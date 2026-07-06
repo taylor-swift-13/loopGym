@@ -114,6 +114,23 @@ def _extract_requires(src: str) -> str:
     return re.sub(r"\s+", " ", m.group(1)).strip()
 
 
+def strip_postcondition(source: str) -> str:
+    """Remove the postcondition (assert/ensures) from the program text.
+
+    Shown to the invariant-GENERATING model so it never sees the goal it must
+    prove — it must synthesise invariants from the loop semantics, not read off
+    (or restate) the assertion.  The reward/sampler keeps the full program (with
+    the assert) to derive negatives.  `requires` (the input contract) is kept."""
+    # drop /*@ ... */ ACSL blocks that mention assert/ensures (the postcondition)
+    def _repl(m):
+        body = m.group(0)
+        return "" if ("assert" in body or "ensures" in body) else body
+    out = re.sub(r"/\*@.*?\*/", _repl, source, flags=re.DOTALL)
+    # drop single-line //@ assert/ensures ...
+    out = re.sub(r"//@[^\n]*\b(?:assert|ensures)\b[^\n]*\n?", "", out)
+    return out
+
+
 def _extract_post(src: str, after: int) -> str:
     """Find an `assert <expr>;` (preferred, after the loop) or an `ensures`."""
     # assert after the loop

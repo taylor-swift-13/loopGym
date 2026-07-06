@@ -21,7 +21,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from ..common.program import Program, parse_program
+from ..common.program import Program, parse_program, strip_postcondition
 from ..common.state import extract_invariants, dedup_normalized
 from ..reward import annotate
 from ..reward import filters
@@ -42,8 +42,10 @@ class MockRolloutProvider:
         return [list(self.rollouts[i % len(self.rollouts)]) for i in range(n)]
 
 
-_PROMPT = """You are given a C function. Produce ACSL loop invariants that prove the assertion.
-Output ONLY invariant lines, each formatted exactly as:  loop invariant <expr>;
+_PROMPT = """You are given a C function. Produce the strongest inductive ACSL loop
+invariants that capture the loop's behavior (conservation/relational laws + tight
+progress bounds). Output ONLY invariant lines, each formatted exactly as:
+loop invariant <expr>;
 
 Program:
 {program}
@@ -73,7 +75,8 @@ class LLMRolloutProvider:
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         out: List[List[str]] = []
-        prompt = _PROMPT.format(program=prog.source)
+        # the model must NOT see the assert (the goal it must prove)
+        prompt = _PROMPT.format(program=strip_postcondition(prog.source))
         for _ in range(n):
             try:
                 resp = self.chat_fn(prompt)
