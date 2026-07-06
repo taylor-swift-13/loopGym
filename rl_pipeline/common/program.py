@@ -117,11 +117,11 @@ def _extract_requires(src: str) -> str:
 def _extract_post(src: str, after: int) -> str:
     """Find an `assert <expr>;` (preferred, after the loop) or an `ensures`."""
     # assert after the loop
-    for m in re.finditer(r"assert\s+(.+?);", src, flags=re.DOTALL):
+    for m in re.finditer(r"\bassert\s*(.+?);", src, flags=re.DOTALL):
         if m.start() >= after:
             return re.sub(r"\s+", " ", m.group(1)).strip()
     # fall back to any assert
-    m = re.search(r"assert\s+(.+?);", src, flags=re.DOTALL)
+    m = re.search(r"\bassert\s*(.+?);", src, flags=re.DOTALL)
     if m:
         return re.sub(r"\s+", " ", m.group(1)).strip()
     # ensures clause
