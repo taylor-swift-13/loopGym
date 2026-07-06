@@ -132,22 +132,40 @@ class ExampleSampler:
                             out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
+    # A negative rejected by an invariant falls in one of two dimensions:
+    #  * relation-breaking (off any reachable manifold)  — from `frontier`, ABUNDANT;
+    #  * bound-breaking (relation holds, range violated)  — from `over-run`, SCARCE.
+    # The reward = fraction rejected, so if one dimension dominates the count the
+    # reward misrepresents quality (a relation-only invariant would score ~99%
+    # while missing every bound).  We BALANCE the two: keep every scarce over-run
+    # negative and cap the abundant frontier ones to `_FRONTIER_PER_OVERRUN×` them,
+    # so bounds carry a meaningful, program-independent share of the reward.
+    _FRONTIER_PER_OVERRUN = 2
+
     def _negatives(self, prog: Program, positives: List[State],
                    overrun: List[State]) -> (List[State], dict):
         reachable = {s.vars_key() for s in positives}
-        # frontier: pure-arithmetic perturbations off the reachable set;
-        # overrun: real body-dynamics past the exit (relation-preserving, out of bounds)
-        proposals = [("frontier", s) for s in self._frontier_negatives(prog, positives, reachable)]
-        proposals += [("overrun", s) for s in overrun]
-        stats = {"proposals": len(proposals), "frontier": 0, "overrun": 0}
-        seen, negatives = set(), []
-        for kind, s in proposals:
-            k = s.vars_key()
-            if k in reachable or k in seen:   # keep only UNREACHABLE, deduped
-                continue
-            seen.add(k)
-            negatives.append(s)
-            stats[kind] += 1
+        seen = set()
+
+        def keep(states):
+            out = []
+            for s in states:
+                k = s.vars_key()
+                if k in reachable or k in seen:   # keep only UNREACHABLE, deduped
+                    continue
+                seen.add(k)
+                out.append(s)
+            return out
+
+        over = keep(overrun)                                        # bound dimension (kept whole)
+        front = keep(self._frontier_negatives(prog, positives, reachable))  # relation dimension
+        cap = self._FRONTIER_PER_OVERRUN * len(over)
+        if over and len(front) > cap:                               # balance + bound size
+            step = len(front) // cap                                # deterministic stride subsample
+            front = front[::step][:cap]
+
+        negatives = over + front
+        stats = {"proposals": len(negatives), "frontier": len(front), "overrun": len(over)}
         return negatives, stats
 
     # ── driver ───────────────────────────────────────────────────────────────
