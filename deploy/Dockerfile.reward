@@ -1,0 +1,41 @@
+# SAM2INV — Reward scoring microservice.
+#
+#   Input : POST /reward  { "program": "<C src>", "rollouts": [ {"invariants":[...]}, ... ] }
+#   Output: per-rollout scores (reward / base / marginal / rejected) + batch_score
+#
+# Build (context = repo root):
+#   docker build -f deploy/Dockerfile.reward -t sam2inv-reward .
+# Run:
+#   docker run --rm -p 8000:8000 sam2inv-reward
+#
+# The reward path uses the Houdini-lite PositiveFilter and needs NO frama-c,
+# torch or transformers, so the image stays slim.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    REWARD_HOST=0.0.0.0 \
+    REWARD_PORT=8000
+
+WORKDIR /app
+
+# --- deps (own layer for cache) ---
+COPY deploy/requirements-reward.txt .
+RUN pip install --no-cache-dir -r requirements-reward.txt
+
+# --- rl_pipeline core needed by the reward service (sampler + reward + common) ---
+COPY rl_pipeline/__init__.py  /app/rl_pipeline/__init__.py
+COPY rl_pipeline/common/      /app/rl_pipeline/common/
+COPY rl_pipeline/sampler/     /app/rl_pipeline/sampler/
+COPY rl_pipeline/reward/      /app/rl_pipeline/reward/
+
+# --- src modules reused only on the optional frama-c/Houdini path (tiny) ---
+COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
+     src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" || exit 1
+
+# shell form so ${REWARD_HOST}/${REWARD_PORT} expand
+CMD python -m rl_pipeline.reward.service --host ${REWARD_HOST} --port ${REWARD_PORT}

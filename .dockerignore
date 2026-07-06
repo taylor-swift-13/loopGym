@@ -1,0 +1,27 @@
+# Build context is the repo root; the Dockerfile COPYs selectively, so this
+# mainly keeps the context small/fast.
+.git
+**/__pycache__
+*.py[cod]
+*.egg-info
+
+# not needed by the reward image
+paper/
+docs/
+models/
+rl_pipeline/inference/
+src/input/
+src/prompts/
+src/log/
+src/loop/
+src/unfold/
+src/outer/
+src/output/
+src/vector_cache_db/
+
+# local dev
+.venv/
+venv/
+.env
+*.swp
+.DS_Store

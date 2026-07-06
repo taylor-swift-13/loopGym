@@ -1,8 +1,0 @@
-From  Require Import __masked__NLA_lipus_3781417_1772944314977_1_goal __masked__NLA_lipus_3781417_1772944314977_1_proof_auto __masked__NLA_lipus_3781417_1772944314977_1_proof_manual.
-
-Module VC_Correctness : VC_Correct.
-  Include common_strategy_proof.
-  Include int_array_strategy_proof.
-  Include __masked__NLA_lipus_3781417_1772944314977_1_proof_auto.
-  Include __masked__NLA_lipus_3781417_1772944314977_1_proof_manual.
-End VC_Correctness.

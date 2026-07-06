@@ -1,8 +1,0 @@
-From  Require Import linear_141_goal linear_141_proof_auto linear_141_proof_manual.
-
-Module VC_Correctness : VC_Correct.
-  Include common_strategy_proof.
-  Include int_array_strategy_proof.
-  Include linear_141_proof_auto.
-  Include linear_141_proof_manual.
-End VC_Correctness.

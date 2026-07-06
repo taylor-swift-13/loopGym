@@ -1,0 +1,14 @@
+# Reward scoring service.
+#   docker compose -f deploy/docker-compose.yml up --build
+services:
+  reward:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.reward
+    image: sam2inv-reward
+    ports:
+      - "8000:8000"
+    environment:
+      REWARD_HOST: 0.0.0.0
+      REWARD_PORT: 8000
+    restart: unless-stopped
