@@ -7,19 +7,24 @@ Produces, per loop, a set of loop-ENTRY valuations:
                 negated guard, must imply the postcondition, so any state with
                 (¬guard ∧ ¬post) MUST be excluded by the invariant.
 
-Negatives are generated from three proposal distributions and then filtered by
-one uniform, spec-derived acceptance test:
+Negatives are generated from spec-directed proposal distributions and then
+filtered by one uniform, spec-derived acceptance test:
 
     accept(s) := (s not reachable) ∧ ¬guard(s) ∧ ¬post(s)
 
 Proposals:
-  - random       : broad domain sweep over the loop-entry variables
-  - mutation-loop: run realistically-mutated programs, take their loop-entry states
-  - mutation-trace: perturb reachable states (near-miss)
+  - random        : broad domain sweep over the loop-entry variables
+  - boundary      : valuations focused around the guard/post constants
+  - exit-boundary : deterministic witnesses next to every reachable exit state,
+                    perturbed on BOTH the post-var and the loop/guard-var axes
+                    (two-sided), incl. relation-preserving joint steps that
+                    expose 'law holds but bound violated' near-misses.
 
 Because the acceptance test is spec-derived (not "trust whatever a wrong program
-printed"), the negatives are representative by construction — mutation only steers
-the proposals toward realistic near-misses.
+printed"), the negatives are representative by construction.  No program mutation
+is used: the two-sided exit-boundary deterministically covers the hard near-miss
+negatives that random mutation only reached by luck — so ONLY a sufficient
+(law + bound) invariant rejects them all.
 """
 from __future__ import annotations
 
@@ -30,7 +35,14 @@ from typing import Dict, List, Optional
 
 from ..common.program import Program, parse_program
 from ..common.state import State, eval_predicate
-from . import cexec, mutators
+from . import cexec
+
+# Canonical sampler defaults — the SINGLE source of truth shared by BOTH the
+# reward service (training) and the inference framework, so training and
+# inference sample identically.  Override per-call only for experiments.
+DEFAULT_N_RUNS = 8
+DEFAULT_N_RANDOM = 3000
+DEFAULT_SEED = 0
 
 
 @dataclass
@@ -51,18 +63,14 @@ class ExampleSampler:
     def __init__(
         self,
         source: str,
-        n_runs: int = 16,
-        n_random: int = 3000,
-        max_loop_mutants: int = 20,
-        mutant_runs: int = 3,
-        seed: int = 0,
+        n_runs: int = DEFAULT_N_RUNS,
+        n_random: int = DEFAULT_N_RANDOM,
+        seed: int = DEFAULT_SEED,
         logger: Optional[logging.Logger] = None,
     ):
         self.source = source
         self.n_runs = n_runs
         self.n_random = n_random
-        self.max_loop_mutants = max_loop_mutants
-        self.mutant_runs = mutant_runs
         self.seed = seed
         self.log = logger or logging.getLogger("rl_pipeline.sampler")
 
@@ -133,71 +141,64 @@ class ExampleSampler:
         return cands
 
     def _exit_boundary_negatives(self, prog: Program, loop_idx: int, positives: List[State]) -> List[State]:
-        """Guaranteed WITNESS negatives adjacent to every reachable exit state.
+        """Deterministic WITNESS negatives around every reachable exit state, on
+        BOTH the post-variable axis AND the loop/guard-variable axis (two-sided).
 
         For a correct proof we need `I ∧ ¬guard ⟹ post`.  The hardest witnesses of
-        an insufficient (too-weak) invariant are the states right next to a true
-        exit state `e` (which satisfies `¬guard ∧ post`) that flip post to false.
-        We perturb the post-variables of each exit positive while keeping the loop
-        guard false, so any invariant that is sound but not tight at the exit
-        boundary is robustly caught — giving `reject-all-negatives` a real margin."""
+        an INSUFFICIENT invariant are states next to a true exit `e` (which
+        satisfies `¬guard ∧ post`) that keep `¬guard` but flip `post` to false.
+        Perturbing only post-vars breaks incidental relations (e.g. a conservation
+        law), so an equality-only invariant already rejects them — no
+        discrimination.  We therefore ALSO step the guard/loop variables across the
+        exit boundary and apply JOINT (correlated / anti-correlated) steps that
+        PRESERVE such relations, producing the 'law holds but bound violated'
+        near-misses that only a sufficient (law + bound) invariant rejects.
+        All candidates pass the shared spec filter `¬guard ∧ ¬post ∧ unreachable`."""
         guard, post = prog.loops[loop_idx].guard, prog.post
         if not post:
             return []
-        post_vars = [v for v in prog.pre_vars if re.search(r"\b" + re.escape(v) + r"\b", post)]
-        if not post_vars:
+
+        def vars_in(expr: str) -> List[str]:
+            return [v for v in prog.pre_vars if re.search(r"\b" + re.escape(v) + r"\b", expr or "")]
+
+        # perturb the variables that define the ¬guard∧¬post region: post-vars
+        # (flip post) AND guard/loop-vars (step across / beyond the exit boundary)
+        active = list(dict.fromkeys(vars_in(post) + vars_in(guard)))
+        if not active:
             return []
-        exit_states = [s for s in positives if eval_predicate(guard, s) is False]
+        exit_states = [s for s in positives if eval_predicate(guard, s) is False][:60]
         deltas = (1, -1, 2, -2, 3, -3, 5, -5, 7, -7)
         out: List[State] = []
         for e in exit_states:
-            for v in post_vars:
+            base = e.vars
+            # 1) single-axis, both directions (covers the loop/guard axis too)
+            for v in active:
                 for d in deltas:
-                    nv = dict(e.vars)
-                    nv[v] = nv[v] + d
+                    nv = dict(base); nv[v] = nv[v] + d
                     out.append(State(vars=nv, pre=dict(e.pre)))
-            for d in (1, -1, 2, -2):  # joint perturbation of all post-vars
-                nv = dict(e.vars)
-                for v in post_vars:
-                    nv[v] = nv[v] + d
-                out.append(State(vars=nv, pre=dict(e.pre)))
+            # 2) joint pairwise steps: same-sign preserves differences (x-y),
+            #    opposite-sign preserves sums (x+y) -> 'law holds, bound broken'
+            for i in range(len(active)):
+                for j in range(i + 1, len(active)):
+                    u, w = active[i], active[j]
+                    for d in (1, -1, 2, -2, 3, -3):
+                        for su, sw in ((d, d), (d, -d)):
+                            nv = dict(base); nv[u] += su; nv[w] += sw
+                            out.append(State(vars=nv, pre=dict(e.pre)))
         return out
-
-    def _mutation_loop_candidates(self, prog: Program, loop_idx: int) -> List[State]:
-        cands: List[State] = []
-        for msrc in mutators.mutate_loop(prog, loop_idx, self.max_loop_mutants):
-            try:
-                mprog = parse_program(msrc)
-            except ValueError:
-                continue
-            if mprog.pre_vars != prog.pre_vars:
-                continue
-            try:
-                states = cexec.collect_reachable(
-                    mprog, loop_idx=loop_idx, n_runs=self.mutant_runs, seed=self.seed + 2
-                )
-            except Exception:
-                states = []
-            cands.extend(states)
-        return cands
 
     def _negatives(self, prog: Program, loop_idx: int, positives: List[State]) -> (List[State], dict):
         guard, post = prog.loops[loop_idx].guard, prog.post
         pos_keys = {s.vars_key() for s in positives}
-        stats = {"proposals": 0, "random": 0, "boundary": 0, "mut_loop": 0, "mut_trace": 0}
+        stats = {"proposals": 0, "random": 0, "boundary": 0, "exit_boundary": 0}
 
         if not post:
             self.log.warning("no postcondition; cannot derive spec negatives for loop %d", loop_idx)
 
         proposals: List[State] = []
-        rand = self._random_candidates(prog, loop_idx)
-        proposals += [("random", s) for s in rand]
+        proposals += [("random", s) for s in self._random_candidates(prog, loop_idx)]
         proposals += [("random", s) for s in self._boundary_candidates(prog, loop_idx)]
-        proposals += [("boundary", s) for s in self._exit_boundary_negatives(prog, loop_idx, positives)]
-        mloop = self._mutation_loop_candidates(prog, loop_idx)
-        proposals += [("mut_loop", s) for s in mloop]
-        mtrace = mutators.mutate_traces(positives)
-        proposals += [("mut_trace", s) for s in mtrace]
+        proposals += [("exit_boundary", s) for s in self._exit_boundary_negatives(prog, loop_idx, positives)]
         stats["proposals"] = len(proposals)
 
         seen, negatives = set(), []
@@ -233,21 +234,20 @@ def _cli():
 
     ap = argparse.ArgumentParser(description="Sample positive/negative loop-entry valuations")
     ap.add_argument("program", help="path to a C program")
-    ap.add_argument("--runs", type=int, default=16)
-    ap.add_argument("--random", type=int, default=3000)
-    ap.add_argument("--mutants", type=int, default=20)
+    ap.add_argument("--runs", type=int, default=DEFAULT_N_RUNS)
+    ap.add_argument("--random", type=int, default=DEFAULT_N_RANDOM)
     ap.add_argument("--show", type=int, default=6, help="print N example states each")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     src = open(args.program).read()
-    es = ExampleSampler(src, n_runs=args.runs, n_random=args.random, max_loop_mutants=args.mutants).sample()
+    es = ExampleSampler(src, n_runs=args.runs, n_random=args.random).sample()
     print(f"program: {es.program.func_name}  guard: {es.program.loop.guard!r}  post: {es.program.post!r}")
     for li in sorted(es.positives):
         st = es.stats[li]
         print(f"\nloop {li}: positives={st['n_pos']} negatives={st['n_neg']} "
               f"(proposals={st.get('proposals','-')}, "
-              f"random={st.get('random','-')}, mut_loop={st.get('mut_loop','-')}, mut_trace={st.get('mut_trace','-')})")
+              f"random={st.get('random','-')}, exit_boundary={st.get('exit_boundary','-')})")
         print("  positives:")
         for s in es.pos(li)[:args.show]:
             print("    +", s.render())

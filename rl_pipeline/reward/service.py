@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 
 from ..sampler import ExampleSampler, ExampleSet
+from ..sampler.example_sampler import DEFAULT_N_RUNS, DEFAULT_N_RANDOM, DEFAULT_SEED
 from . import filters
 from .reward_calculator import RewardCalculator
 
@@ -37,18 +38,14 @@ def _get_filter():
 
 
 class SamplerCfg(BaseModel):
-    # Fast defaults for RL reward serving (sampling is on the critical path,
-    # shared by inference + reward, and cached per program):
-    #   - random sampling is cheap (~0.1s / 3000) — keep it generous,
-    #   - loop mutation is the expensive part (gcc compile+run per mutant) — off
-    #     by default; boundary/random negatives + real Houdini keep the signal,
-    #   - positives are only a cheap pre-filter (real Houdini decides) — n_runs=8.
-    # ~0.4-0.7s first call, ~0 on cache hit. Override per-request for max coverage.
-    n_runs: int = 8
-    n_random: int = 3000
-    max_loop_mutants: int = 0
-    mutant_runs: int = 0
-    seed: int = 0
+    # Defaults come from the SINGLE canonical source in sampler.example_sampler,
+    # so the reward service (training) and the inference framework sample
+    # identically. No mutation: negatives are random + two-sided exit-boundary,
+    # which deterministically produce the hard "law holds but bound violated"
+    # near-misses so only a sufficient invariant rejects them all.
+    n_runs: int = DEFAULT_N_RUNS
+    n_random: int = DEFAULT_N_RANDOM
+    seed: int = DEFAULT_SEED
 
 
 class RewardRequest(BaseModel):
@@ -76,8 +73,7 @@ def _get_examples(program: str, cfg: SamplerCfg) -> ExampleSet:
     es = _EXAMPLE_CACHE.get(key)
     if es is None:
         es = ExampleSampler(
-            program, n_runs=cfg.n_runs, n_random=cfg.n_random,
-            max_loop_mutants=cfg.max_loop_mutants, mutant_runs=cfg.mutant_runs, seed=cfg.seed,
+            program, n_runs=cfg.n_runs, n_random=cfg.n_random, seed=cfg.seed,
         ).sample()
         _EXAMPLE_CACHE[key] = es
     return es

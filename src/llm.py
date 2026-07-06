@@ -71,8 +71,9 @@ class BaseChatModel(ABC):
         self.config = config
         # 从文件加载system prompt
         import os
-        self._cot_mode = bool(getattr(config, 'enable_cot', False))
-        prompt_filename = 'system_prompt_cot.txt' if self._cot_mode else getattr(config, 'system_prompt_file', 'system_prompt.txt')
+        # Single deterministic prompt — no CoT.
+        self._cot_mode = False
+        prompt_filename = getattr(config, 'system_prompt_file', 'system_prompt.txt')
         system_prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', prompt_filename)
         try:
             with open(system_prompt_path, 'r', encoding='utf-8') as f:

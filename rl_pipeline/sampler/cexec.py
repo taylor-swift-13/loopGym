@@ -9,8 +9,8 @@ No dependency on src/ — the sampler component is standalone.  We:
      `requires`), sweeping a broad range of magnitudes/signs/edge values;
   3. compile with gcc and run, capturing the printed valuations.
 
-Used for BOTH the correct program (positives) and mutated programs
-(mutation-loop negatives).
+Used to collect reachable loop-entry valuations (positives) of the correct
+program.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 from ..common.program import Program
 from ..common.state import State
 
-_ITER_CAP = 200          # per-loop iteration cap (keeps mutated/divergent loops finite)
+_ITER_CAP = 200          # per-loop iteration cap (keeps divergent loops finite)
 _MARK = "__LH__"
 _DEFAULT_MIN = -64
 _DEFAULT_MAX = 64
