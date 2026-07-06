@@ -53,11 +53,19 @@ Program:
 
 
 class LLMRolloutProvider:
-    """Queries an LLM for invariants. `chat_fn` maps a prompt string -> response string."""
+    """Queries an LLM for invariants. `chat_fn` maps a prompt string -> response string.
 
-    def __init__(self, chat_fn: Optional[Callable[[str], str]] = None, logger=None):
+    Two modes via `hide_assert`:
+      * True  (default) — the program shown to the model has its postcondition
+        stripped, so it synthesises invariants from loop semantics ("closed-book").
+      * False — the full program (assert visible) is shown ("open-book"): the
+        model may use the goal to guide invariant discovery."""
+
+    def __init__(self, chat_fn: Optional[Callable[[str], str]] = None, logger=None,
+                 hide_assert: bool = True):
         self.log = logger or logging.getLogger("rl_pipeline.inference.llm")
         self.chat_fn = chat_fn or self._default_chat_fn()
+        self.hide_assert = hide_assert
 
     @staticmethod
     def _default_chat_fn() -> Callable[[str], str]:
@@ -75,8 +83,9 @@ class LLMRolloutProvider:
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         out: List[List[str]] = []
-        # the model must NOT see the assert (the goal it must prove)
-        prompt = _PROMPT.format(program=strip_postcondition(prog.source))
+        # closed-book: hide the assert (goal) so the model can't restate it
+        source = strip_postcondition(prog.source) if self.hide_assert else prog.source
+        prompt = _PROMPT.format(program=source)
         for _ in range(n):
             try:
                 resp = self.chat_fn(prompt)
@@ -116,11 +125,14 @@ class InferenceFramework:
         max_rerolls: int = 1,
         reroll_threshold: float = 0.6,
         sampler_kwargs: Optional[dict] = None,
+        hide_assert: bool = True,
         logger: Optional[logging.Logger] = None,
     ):
         self.source = source
         self.prog = parse_program(source)
-        self.provider = rollout_provider or LLMRolloutProvider(logger=logger)
+        # hide_assert applies to the DEFAULT provider; a passed-in provider keeps
+        # its own setting (set hide_assert on it directly).
+        self.provider = rollout_provider or LLMRolloutProvider(logger=logger, hide_assert=hide_assert)
         self.examples = examples
         self.filter = invariant_filter or filters.auto_filter(logger)
         self.positive = filters.PositiveFilter()
