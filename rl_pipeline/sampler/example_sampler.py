@@ -67,9 +67,8 @@ class ExampleSampler:
         self.log = logger or logging.getLogger("rl_pipeline.sampler")
 
     # ── positives ────────────────────────────────────────────────────────────
-    def _positives(self, prog: Program, loop_idx: int) -> List[State]:
-        states = cexec.collect_reachable(prog, loop_idx=loop_idx, n_runs=self.n_runs, seed=self.seed)
-        # dedup by vars
+    @staticmethod
+    def _dedup(states: List[State]) -> List[State]:
         seen, out = set(), []
         for s in states:
             k = s.vars_key()
@@ -116,18 +115,22 @@ class ExampleSampler:
                             out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
-    def _negatives(self, prog: Program, loop_idx: int, positives: List[State]) -> (List[State], dict):
+    def _negatives(self, prog: Program, positives: List[State],
+                   overrun: List[State]) -> (List[State], dict):
         reachable = {s.vars_key() for s in positives}
-        proposals = self._frontier_negatives(prog, positives, reachable)
-        stats = {"proposals": len(proposals), "frontier": 0}
+        # frontier: pure-arithmetic perturbations off the reachable set;
+        # overrun: real body-dynamics past the exit (relation-preserving, out of bounds)
+        proposals = [("frontier", s) for s in self._frontier_negatives(prog, positives, reachable)]
+        proposals += [("overrun", s) for s in overrun]
+        stats = {"proposals": len(proposals), "frontier": 0, "overrun": 0}
         seen, negatives = set(), []
-        for s in proposals:
+        for kind, s in proposals:
             k = s.vars_key()
             if k in reachable or k in seen:   # keep only UNREACHABLE, deduped
                 continue
             seen.add(k)
             negatives.append(s)
-            stats["frontier"] += 1
+            stats[kind] += 1
         return negatives, stats
 
     # ── driver ───────────────────────────────────────────────────────────────
@@ -135,10 +138,12 @@ class ExampleSampler:
         prog = parse_program(self.source)
         es = ExampleSet(program=prog)
         for loop_idx in range(len(prog.loops)):
-            positives = self._positives(prog, loop_idx)
+            reach, overrun = cexec.collect_traces(prog, loop_idx=loop_idx,
+                                                  n_runs=self.n_runs, seed=self.seed)
+            positives = self._dedup(reach)
             es.positives[loop_idx] = positives
-            if loop_idx == 0:  # negatives derived from program post (final assertion)
-                negatives, stats = self._negatives(prog, loop_idx, positives)
+            if loop_idx == 0:
+                negatives, stats = self._negatives(prog, positives, overrun)
                 es.negatives[loop_idx] = negatives
                 es.stats[loop_idx] = {"n_pos": len(positives), "n_neg": len(negatives), **stats}
             else:
