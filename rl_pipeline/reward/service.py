@@ -19,7 +19,7 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 
 from ..sampler import ExampleSampler, ExampleSet
-from ..sampler.example_sampler import DEFAULT_N_RUNS, DEFAULT_N_RANDOM, DEFAULT_SEED
+from ..sampler.example_sampler import DEFAULT_N_RUNS, DEFAULT_SEED
 from . import filters
 from .reward_calculator import RewardCalculator
 
@@ -38,13 +38,11 @@ def _get_filter():
 
 
 class SamplerCfg(BaseModel):
-    # Defaults come from the SINGLE canonical source in sampler.example_sampler,
-    # so the reward service (training) and the inference framework sample
-    # identically. No mutation: negatives are random + two-sided exit-boundary,
-    # which deterministically produce the hard "law holds but bound violated"
-    # near-misses so only a sufficient invariant rejects them all.
+    # Defaults from the SINGLE canonical source in sampler.example_sampler, so the
+    # reward service (training) and the inference framework sample identically.
+    # The sampler sees ONLY the loop: negatives are UNREACHABLE loop-head
+    # valuations (states no execution trace produces), never derived from assert.
     n_runs: int = DEFAULT_N_RUNS
-    n_random: int = DEFAULT_N_RANDOM
     seed: int = DEFAULT_SEED
 
 
@@ -72,9 +70,7 @@ def _get_examples(program: str, cfg: SamplerCfg) -> ExampleSet:
     key = _cache_key(program, cfg)
     es = _EXAMPLE_CACHE.get(key)
     if es is None:
-        es = ExampleSampler(
-            program, n_runs=cfg.n_runs, n_random=cfg.n_random, seed=cfg.seed,
-        ).sample()
+        es = ExampleSampler(program, n_runs=cfg.n_runs, seed=cfg.seed).sample()
         _EXAMPLE_CACHE[key] = es
     return es
 
