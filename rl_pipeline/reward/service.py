@@ -37,10 +37,17 @@ def _get_filter():
 
 
 class SamplerCfg(BaseModel):
-    n_runs: int = 16
+    # Fast defaults for RL reward serving (sampling is on the critical path,
+    # shared by inference + reward, and cached per program):
+    #   - random sampling is cheap (~0.1s / 3000) — keep it generous,
+    #   - loop mutation is the expensive part (gcc compile+run per mutant) — off
+    #     by default; boundary/random negatives + real Houdini keep the signal,
+    #   - positives are only a cheap pre-filter (real Houdini decides) — n_runs=8.
+    # ~0.4-0.7s first call, ~0 on cache hit. Override per-request for max coverage.
+    n_runs: int = 8
     n_random: int = 3000
-    max_loop_mutants: int = 20
-    mutant_runs: int = 3
+    max_loop_mutants: int = 0
+    mutant_runs: int = 0
     seed: int = 0
 
 

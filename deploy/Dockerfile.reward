@@ -1,15 +1,15 @@
-# SAM2INV — Reward scoring microservice.
+# SAM2INV — Reward scoring microservice (real Houdini, self-contained).
 #
 #   Input : POST /reward  { "program": "<C src>", "rollouts": [ {"invariants":[...]}, ... ] }
 #   Output: per-rollout scores (reward / base / marginal / rejected) + batch_score
 #
-# Build (context = repo root):
-#   docker build -f deploy/Dockerfile.reward -t sam2inv-reward .
-# Run:
-#   docker run --rm -p 8000:8000 sam2inv-reward
+# The reward filter is a CASCADE: lite PositiveFilter (preprocessing) -> real
+# inductive Houdini via Frama-C/WP + z3.  frama-c + z3 + why3 are BUNDLED in the
+# image, so a deployment host (e.g. a verl RL server) needs NO local frama-c —
+# it only calls the HTTP endpoint.
 #
-# The reward path uses the Houdini-lite PositiveFilter and needs NO frama-c,
-# torch or transformers, so the image stays slim.
+# Build (context = repo root):  docker build -f deploy/Dockerfile.reward -t sam2inv-reward .
+# Run:                          docker run --rm -p 8000:8000 sam2inv-reward
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -17,9 +17,19 @@ ENV PYTHONUNBUFFERED=1 \
     REWARD_HOST=0.0.0.0 \
     REWARD_PORT=8000
 
+# --- Frama-C (WP plugin) + z3 + why3, so real Houdini works with no host install ---
+# python:3.11-slim is Debian bookworm; frama-c/z3/why3 are in Debian main.
+# `why3 config detect` registers z3 (and alt-ergo) as WP provers at build time
+# (written to root's why3 config, baked into the image).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends frama-c z3 why3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ( why3 config detect || why3 config --detect ) \
+ && frama-c -version && z3 --version
+
 WORKDIR /app
 
-# --- deps (own layer for cache) ---
+# --- python deps (own layer for cache) ---
 COPY deploy/requirements-reward.txt .
 RUN pip install --no-cache-dir -r requirements-reward.txt
 
@@ -29,12 +39,20 @@ COPY rl_pipeline/common/      /app/rl_pipeline/common/
 COPY rl_pipeline/sampler/     /app/rl_pipeline/sampler/
 COPY rl_pipeline/reward/      /app/rl_pipeline/reward/
 
-# --- src modules reused only on the optional frama-c/Houdini path (tiny) ---
+# --- src modules the real HoudiniFilter reuses (frama-c/WP driver + spec checks) ---
 COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
      src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
 
+# Build-time proof that the real-Houdini path is wired (frama-c present -> cascade):
+RUN python -c "import sys; sys.path.insert(0,'src'); \
+from rl_pipeline.reward import filters as F; \
+assert F.frama_c_available(), 'frama-c missing in image'; \
+f=F.auto_filter(); \
+print('filter_mode =', f.name); \
+assert f.name.startswith('cascade'), 'expected cascade(lite->houdini), got '+f.name"
+
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" || exit 1
 
 # shell form so ${REWARD_HOST}/${REWARD_PORT} expand

@@ -1,6 +1,6 @@
-# Reward scoring service — minimal runtime deps.
-# The reward chain (sampler + reward_calculator + PositiveFilter) needs no
-# torch / transformers / frama-c. numpy is only used by io.py's JSON helper.
+# Reward scoring service — python runtime deps.
+# Frama-C / z3 / why3 (for real Houdini) are installed via apt in the Dockerfile,
+# NOT here. numpy is only used by io.py's JSON helper.
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 pydantic>=2.5,<3.0
