@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+import re
 from typing import Dict, List, Optional
 
 from ..common.program import Program, parse_program
@@ -83,21 +84,37 @@ class ExampleSampler:
     # reachability is decided purely by execution (the sampled reachable set).
     # The strongest invariant is the tightest characterization of the reachable
     # set: sound on every positive, rejecting as many unreachable states as it can.
+    @staticmethod
+    def _modified_vars(prog: Program, loop_idx: int = 0) -> List[str]:
+        """Loop-head variables that the loop BODY assigns to — these are the ones
+        that move along a trace, so perturbing them leaves the reachable set.  A
+        variable that the loop never writes is a fixed input and is kept constant
+        (this is data-flow, not a param/local distinction: a *parameter* modified in
+        the loop, e.g. `while(unknown()){x=2;}`, is correctly treated as movable)."""
+        loop = prog.loops[loop_idx]
+        body = prog.source[loop.body_open + 1: loop.body_close]
+        mod = []
+        for v in prog.pre_vars:
+            e = re.escape(v)
+            if (re.search(rf"\b{e}\s*(=[^=]|[-+*/%|&^]=)", body)
+                    or re.search(rf"\b{e}\s*(\+\+|--)", body)
+                    or re.search(rf"(\+\+|--)\s*\b{e}\b", body)):
+                mod.append(v)
+        return mod
+
     def _frontier_negatives(self, prog: Program, positives: List[State],
                             reachable: set) -> List[State]:
         """Hard negatives sit just off the reachable frontier.  Perturb each
-        reachable state's MODIFIED variables (parameters kept fixed, so the
-        perturbation stays at a sampled parameter setting and is reliably
-        unreachable):
+        reachable state's MODIFIED variables (loop never-written vars stay fixed, so
+        the perturbation is reliably unreachable):
           * single-axis steps leave any reachable manifold (e.g. z==x*y, x+y==n)
             → expose a missing relational law;
           * joint pairwise steps (same-sign preserves differences, opposite-sign
             preserves sums) stay on a LINEAR manifold but leave the reachable
             segment → expose a missing bound (e.g. 0<=x)."""
-        params = set(prog.params)
-        movable = [v for v in prog.pre_vars if v not in params]
-        if not movable:
-            return []
+        movable = self._modified_vars(prog, 0)
+        if not movable:   # fallback if the body write couldn't be detected syntactically
+            movable = [v for v in prog.pre_vars if v not in set(prog.params)] or list(prog.pre_vars)
         deltas = (1, -1, 2, -2, 3, -3, 5, -5, 7, -7)
         out: List[State] = []
         for r in positives[:80]:
