@@ -1,0 +1,51 @@
+# SAM2INV — Inference image (testing): vLLM + Frama-C, self-contained.
+#
+# Deploys a TRAINED model to an in-process vLLM engine and runs inference over a
+# set of C programs:  sample → generate (vLLM) → positive-filter → combine →
+# Houdini → Frama-C/WP verify.  Shares the SAME sampler as the reward image.
+#
+# gcc (sampler) + frama-c + z3 + why3 are bundled, so a GPU host needs NO local
+# frama-c.  Based on the official vLLM image (CUDA + vLLM already present).
+#
+# Build (context = repo root):
+#   docker build -f deploy/Dockerfile.inference -t sam2inv-inference .
+# Run (mount the trained model and the test programs):
+#   docker run --gpus all --rm \
+#     -v /path/to/model:/model -v /path/to/programs:/data \
+#     sam2inv-inference --model /model --inputs '/data/*.c' --n-rollouts 8 --output /data/out.jsonl
+FROM vllm/vllm-openai:latest
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+# --- gcc (sampler) + Frama-C/WP + z3 + why3 (real Houdini) ---
+# The vLLM image is Ubuntu-based; these live in Ubuntu universe.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev frama-c z3 why3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ( why3 config detect || why3 config --detect ) \
+ && gcc --version && frama-c -version && z3 --version
+
+WORKDIR /app
+
+# --- full rl_pipeline (inference reuses reward.filters for Houdini + sampler) ---
+COPY rl_pipeline/ /app/rl_pipeline/
+
+# --- src modules the HoudiniFilter / verifier reuse ---
+COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
+     src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
+# --- system prompt read by the vLLM rollout provider ---
+COPY src/prompts/ /app/src/prompts/
+
+# Build-time check: gcc sampling works and the real-Houdini cascade is wired.
+RUN python3 -c "import sys; sys.path.insert(0,'src'); \
+from rl_pipeline.reward import filters as F; \
+assert F.frama_c_available() and F.auto_filter().name.startswith('cascade'), 'frama-c/cascade not wired'; \
+from rl_pipeline.sampler import ExampleSampler; \
+src='/*@ requires n>=0; */ void f(int n){int x=n,y=0; while(x>0){x--;y++;}}'; \
+assert len(ExampleSampler(src).sample().pos(0))>0, 'gcc sampling produced no positives'; \
+print('build OK: gcc-sampling + frama-c cascade + vllm base ready')"
+
+# override the vLLM image's OpenAI-server entrypoint: run our inference CLI.
+# args (--model / --inputs / ...) are appended at `docker run`.
+ENTRYPOINT ["python3", "-m", "rl_pipeline.inference"]
+CMD ["--help"]

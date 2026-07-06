@@ -17,15 +17,16 @@ ENV PYTHONUNBUFFERED=1 \
     REWARD_HOST=0.0.0.0 \
     REWARD_PORT=8000
 
-# --- Frama-C (WP plugin) + z3 + why3, so real Houdini works with no host install ---
-# python:3.11-slim is Debian bookworm; frama-c/z3/why3 are in Debian main.
+# --- gcc (the sampler compiles+runs each program to collect reachable states) +
+#     Frama-C (WP) + z3 + why3 (real Houdini) — all bundled, no host install ---
+# python:3.11-slim is Debian bookworm; these are all in Debian main.
 # `why3 config detect` registers z3 (and alt-ergo) as WP provers at build time
 # (written to root's why3 config, baked into the image).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends frama-c z3 why3 \
+ && apt-get install -y --no-install-recommends gcc libc6-dev frama-c z3 why3 \
  && rm -rf /var/lib/apt/lists/* \
  && ( why3 config detect || why3 config --detect ) \
- && frama-c -version && z3 --version
+ && gcc --version && frama-c -version && z3 --version
 
 WORKDIR /app
 
@@ -43,13 +44,17 @@ COPY rl_pipeline/reward/      /app/rl_pipeline/reward/
 COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
      src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
 
-# Build-time proof that the real-Houdini path is wired (frama-c present -> cascade):
+# Build-time proof the image is self-sufficient: gcc sampling works AND the
+# real-Houdini path is wired (frama-c present -> cascade). Fails the build if not.
 RUN python -c "import sys; sys.path.insert(0,'src'); \
 from rl_pipeline.reward import filters as F; \
 assert F.frama_c_available(), 'frama-c missing in image'; \
-f=F.auto_filter(); \
-print('filter_mode =', f.name); \
-assert f.name.startswith('cascade'), 'expected cascade(lite->houdini), got '+f.name"
+assert F.auto_filter().name.startswith('cascade'), 'filter is not cascade(lite->houdini)'; \
+from rl_pipeline.sampler import ExampleSampler; \
+src='/*@ requires n>=0; */ void f(int n){int x=n,y=0; while(x>0){x--;y++;}}'; \
+es=ExampleSampler(src).sample(); \
+assert len(es.pos(0))>0, 'gcc sampling produced no positives'; \
+print('build OK: gcc-sampling pos=%d, filter=cascade'%len(es.pos(0)))"
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
