@@ -229,16 +229,28 @@ def _find_loops(clean: str, start: int, end: int) -> List[LoopInfo]:
 
 
 def _find_local_inits(src: str, func_open: int, loop_start: int) -> List[Tuple[str, str]]:
+    """Locals in scope at the loop entry, including comma-separated declarator lists
+    like `int a,b,p,q,r,s;` (values assigned later) — every name must be captured so
+    it appears in pre_vars, else the sampler has no variables to work with."""
     region = src[func_open + 1: loop_start]
     inits: List[Tuple[str, str]] = []
-    # `int x = expr;`  (also long/short/unsigned)
-    for m in re.finditer(r"\b(?:unsigned\s+|signed\s+)?(?:int|long|short)\s+(\w+)\s*=\s*([^;]+);", region):
-        inits.append((m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()))
-    # bare `int x;` (uninitialized) -> default 0
-    for m in re.finditer(r"\b(?:unsigned\s+|signed\s+)?(?:int|long|short)\s+(\w+)\s*;", region):
-        name = m.group(1)
-        if name not in [n for n, _ in inits]:
-            inits.append((name, "0"))
+    seen = set()
+    # `int|long|short <declarator-list>;` — split the list on commas
+    for m in re.finditer(r"\b(?:unsigned\s+|signed\s+)?(?:int|long|short)\s+([^;{}]+);", region):
+        decls = m.group(1)
+        if "(" in decls:            # skip function declarations
+            continue
+        for part in decls.split(","):
+            part = part.strip()
+            if "=" in part:
+                nm, _, expr = part.partition("=")
+                nm, expr = nm.strip(), re.sub(r"\s+", " ", expr).strip()
+            else:
+                nm, expr = part, "0"
+            nm = re.sub(r"\[.*\]", "", nm.lstrip("*")).strip()   # drop ptr/array decorators
+            if re.fullmatch(r"\w+", nm) and nm not in seen:
+                seen.add(nm)
+                inits.append((nm, expr))
     return inits
 
 

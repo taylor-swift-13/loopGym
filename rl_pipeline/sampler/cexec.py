@@ -133,8 +133,12 @@ def _build_program(instr_func: str, prog: Program, inputs: Dict[str, int], run_s
     for name in sorted(set(re.findall(r"\b(unknown\w*)\s*\(", instr_func))):
         if not re.search(rf"\b{name}\s*\([^;{{)]*\)\s*\{{", instr_func):
             prelude += f"int {name}(){{ return rand()%21 - 10; }}\n"
+    fname = prog.func_name
+    if fname == "main":   # program's own function is main() -> rename to avoid clashing with the harness
+        instr_func = re.sub(r"\bmain\s*\(", "__prog_main(", instr_func, count=1)
+        fname = "__prog_main"
     decls = "\n".join(f"    int {p} = {inputs.get(p, 0)};" for p in prog.params)
-    call = f"    {prog.func_name}({', '.join(prog.params)});"
+    call = f"    {fname}({', '.join(prog.params)});"
     # per-run srand so NONDETERMINISTIC (unknown-driven) programs explore different
     # traces across runs; unbuffered stdout so states before an over-run crash survive
     main = f"\nint main(){{\n    setbuf(stdout, NULL);\n    srand({run_seed});\n{decls}\n{call}\n    return 0;\n}}\n"
