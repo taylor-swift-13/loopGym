@@ -42,28 +42,26 @@ class SyntaxChecker:
         # 保存文件到 output 目录（无论成功或失败）
         self._save_verified_file(file_path)
 
-        # Parse-only syntax check. Full WP proving is done by OutputVerifier.
+        # Parse-only syntax check delegated to Frama-C's OWN front-end (no heuristic
+        # string matching): `-print` parses the C + ACSL and exits non-zero if it
+        # cannot.  `-kernel-warn-key annot-error=abort` promotes a malformed ACSL
+        # annotation from a warning to a hard (non-zero) error, so the exit code is
+        # the sole, authoritative syntax verdict.
         wp_command = [
             "frama-c",
+            "-kernel-warn-key", "annot-error=abort",
             "-print",
-            file_path
+            file_path,
         ]
 
         try:
-            # Use subprocess.run to execute command and capture output
             result = subprocess.run(wp_command, capture_output=True, text=True, timeout=15)
-            
-            # Check both stdout and stderr for syntax errors
-            output = result.stdout + result.stderr
-            
-            # Check for syntax errors in the output
-            if 'syntax error' in output.lower() or 'parse error' in output.lower() or result.returncode != 0:
-                self.syntax_msg = "syntax Error\n" + output[:1000]  # Store error information in syntax_msg
-            else:
+            if result.returncode == 0:
                 self.syntax_msg = "syntax Correct"
+            else:
+                self.syntax_msg = "syntax Error\n" + (result.stdout + result.stderr)[:1000]
         except Exception as e:
-            # If command execution fails, capture error information
-            self.syntax_msg = "syntax Error\n" + str(e)  # Store error information in syntax_msg
+            self.syntax_msg = "syntax Error\n" + str(e)
 
 
 if __name__ == "__main__":
