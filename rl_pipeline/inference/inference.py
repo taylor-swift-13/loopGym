@@ -25,7 +25,6 @@ from ..common.program import Program, parse_program, strip_postcondition
 from ..common.state import extract_invariants, dedup_normalized
 from ..reward import annotate
 from ..reward import filters
-from ..sampler import ExampleSampler, ExampleSet
 
 
 # ── rollout providers ────────────────────────────────────────────────────────
@@ -96,6 +95,53 @@ class LLMRolloutProvider:
         return out
 
 
+def _load_system_prompt() -> str:
+    from ..common import paths
+    src_dir = paths.ensure_src_on_path()
+    p = os.path.join(src_dir, "prompts", "system_prompt.txt")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+class VLLMRolloutProvider:
+    """Batched rollout generation with an IN-PROCESS vLLM engine — all n samples
+    for a program are produced in ONE call (high-throughput RL path, no HTTP).
+    Honors `hide_assert` like LLMRolloutProvider.
+
+    Requires the optional `vllm` package (+ a GPU).  To use a vLLM OpenAI *server*
+    instead (e.g. verl's), point `src.llm.Chatbot` at it via
+    `LLMConfig(base_url="http://host:8000/v1", api_model=...)` and pass its
+    `.chat` to `LLMRolloutProvider(chat_fn=...)` — no code change needed."""
+
+    def __init__(self, model: Optional[str] = None, llm=None, hide_assert: bool = True,
+                 temperature: float = 1.0, top_p: float = 1.0, max_tokens: int = 2048,
+                 logger=None, **llm_kwargs):
+        self.log = logger or logging.getLogger("rl_pipeline.inference.vllm")
+        self.hide_assert = hide_assert
+        from vllm import LLM, SamplingParams  # optional dependency
+        self._SamplingParams = SamplingParams
+        self.llm = llm if llm is not None else LLM(model=model, **llm_kwargs)
+        self.system_prompt = _load_system_prompt()
+        self.temperature, self.top_p, self.max_tokens = temperature, top_p, max_tokens
+
+    def __call__(self, prog: Program, n: int) -> List[List[str]]:
+        source = strip_postcondition(prog.source) if self.hide_assert else prog.source
+        messages = [{"role": "user", "content": _PROMPT.format(program=source)}]
+        if self.system_prompt:
+            messages.insert(0, {"role": "system", "content": self.system_prompt})
+        sp = self._SamplingParams(n=n, temperature=self.temperature,
+                                  top_p=self.top_p, max_tokens=self.max_tokens)
+        try:
+            outs = self.llm.chat(messages, sp, use_tqdm=False)
+        except Exception as e:
+            self.log.warning("vLLM generate failed: %s", e)
+            return [[] for _ in range(n)]
+        return [extract_invariants(o.text) for o in outs[0].outputs]
+
+
 # ── result ───────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -114,17 +160,17 @@ class InferenceResult:
 # ── framework ─────────────────────────────────────────────────────────────────
 
 class InferenceFramework:
+    """loop -> invariants.  Generate rollouts, union them, prune with real Houdini
+    (Frama-C/WP), verify with Frama-C.  INDEPENDENT of the reward component — it
+    does NOT sample positives/negatives (that is only the reward's job)."""
+
     def __init__(
         self,
         source: str,
         rollout_provider=None,
-        examples: Optional[ExampleSet] = None,
         invariant_filter=None,
-        reward_calculator=None,
         n_rollouts: int = 4,
         max_rerolls: int = 1,
-        reroll_threshold: float = 0.6,
-        sampler_kwargs: Optional[dict] = None,
         hide_assert: bool = True,
         logger: Optional[logging.Logger] = None,
     ):
@@ -133,20 +179,10 @@ class InferenceFramework:
         # hide_assert applies to the DEFAULT provider; a passed-in provider keeps
         # its own setting (set hide_assert on it directly).
         self.provider = rollout_provider or LLMRolloutProvider(logger=logger, hide_assert=hide_assert)
-        self.examples = examples
         self.filter = invariant_filter or filters.auto_filter(logger)
-        self.positive = filters.PositiveFilter()
-        self.reward_calc = reward_calculator
         self.n_rollouts = n_rollouts
         self.max_rerolls = max_rerolls
-        self.reroll_threshold = reroll_threshold
-        self.sampler_kwargs = sampler_kwargs or {}
         self.log = logger or logging.getLogger("rl_pipeline.inference")
-
-    def _get_examples(self) -> ExampleSet:
-        if self.examples is None:
-            self.examples = ExampleSampler(self.source, **self.sampler_kwargs).sample()
-        return self.examples
 
     def _verify(self, annotated_code: str) -> Optional[bool]:
         """Frama-C verify the final annotated code (None if frama-c unavailable)."""
@@ -176,57 +212,42 @@ class InferenceFramework:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _attempt(self, examples: ExampleSet):
+    def _attempt(self):
         loop_idx = 0
-        positives = examples.pos(loop_idx)
         rollouts = self.provider(self.prog, self.n_rollouts)
-
-        # positive-filter each rollout (fast, cheap soundness pre-filter)
-        filtered = [self.positive.filter(self.prog, loop_idx, r, positives) for r in rollouts]
-
-        # combine (union) across surviving rollouts
-        union = dedup_normalized(c for fr in filtered for c in fr)
-
-        # Houdini prune + build final annotated code
-        survivors = self.filter.filter(self.prog, loop_idx, union, positives)
+        # combine (union) across all rollouts, then prune with real Houdini
+        # (Frama-C/WP).  No positives -> no lite pre-filter; Houdini is the judge.
+        union = dedup_normalized(c for r in rollouts for c in r)
+        survivors = self.filter.filter(self.prog, loop_idx, union, positives=None)
         annotated = annotate.build_annotated(self.prog, survivors, loop_idx)
         verified = self._verify(annotated)
-
-        batch_score = None
-        if self.reward_calc is not None:
-            br = self.reward_calc.compute(self.source, rollouts, examples=examples)
-            batch_score = br.batch_score
-
         return InferenceResult(
             program=self.prog.func_name,
             final_invariants=survivors,
             annotated_code=annotated,
             verified=verified,
-            batch_score=batch_score,
+            batch_score=None,
             reroll_count=0,
             n_rollouts=self.n_rollouts,
             rollouts=rollouts,
-            filtered_rollouts=filtered,
+            filtered_rollouts=None,
         )
 
     def run(self) -> InferenceResult:
-        examples = self._get_examples()
         best: Optional[InferenceResult] = None
         for attempt in range(self.max_rerolls + 1):
-            res = self._attempt(examples)
+            res = self._attempt()
             res.reroll_count = attempt
             if best is None or _better(res, best):
                 best = res
-            done = res.verified is True or (
-                res.batch_score is not None and res.batch_score >= self.reroll_threshold)
-            if done:
+            if res.verified is True:
                 break
             if attempt < self.max_rerolls:
-                self.log.info("re-rolling (attempt %d, batch_score=%s)", attempt + 1, res.batch_score)
+                self.log.info("re-rolling (attempt %d, verified=%s)", attempt + 1, res.verified)
         return best
 
 
 def _better(a: InferenceResult, b: InferenceResult) -> bool:
-    ra = (1 if a.verified else 0, a.batch_score if a.batch_score is not None else -1, len(a.final_invariants))
-    rb = (1 if b.verified else 0, b.batch_score if b.batch_score is not None else -1, len(b.final_invariants))
+    ra = (1 if a.verified else 0, len(a.final_invariants))
+    rb = (1 if b.verified else 0, len(b.final_invariants))
     return ra > rb
