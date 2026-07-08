@@ -28,6 +28,20 @@ from . import annotate
 _ACSL_STOPWORDS = {"at", "Pre", "Post", "old", "result", "true", "false",
                    "True", "False", "None", "and", "or", "not"}
 
+# Complexity gate: a real loop invariant is a short law (the longest honest ones
+# in the benchmark suite are ~80 chars / a handful of atoms).  Without a cap, a
+# policy can memorize the sampled negative set into ONE mega-predicate
+# (`!(x==1 && y==2) && !(x==3 && ...)`) that rejects every negative while being
+# semantically empty — the ultimate reward hack.  Oversized candidates are
+# dropped, not truncated.
+_MAX_INV_CHARS = 160
+_MAX_INV_ATOMS = 12
+_ATOM_RE = re.compile(r"==|!=|<=|>=|<|>")
+
+
+def too_complex(inv: str) -> bool:
+    return len(inv) > _MAX_INV_CHARS or len(_ATOM_RE.findall(inv)) > _MAX_INV_ATOMS
+
 
 def frama_c_available() -> bool:
     return shutil.which("frama-c") is not None
@@ -41,25 +55,85 @@ def out_of_scope_ids(inv: str, allowed) -> List[str]:
     return [i for i in ids if i not in allow]
 
 
+# Soundness checks evaluate every candidate on every positive; nondeterministic
+# programs can yield hundreds of thousands of positives, making that quadratic
+# blow-up the dominant cost.  A stratified subsample bounds it — but the
+# per-variable EXTREME states must always stay in: they are exactly the
+# witnesses that filter overfit sample-boxes (`v <= max_observed`).
+_MAX_FILTER_POSITIVES = 4096
+
+
+def representative_positives(positives: List[State]) -> List[State]:
+    if len(positives) <= _MAX_FILTER_POSITIVES:
+        return positives
+    idxs = set()
+    lo: dict = {}
+    hi: dict = {}
+    for i, s in enumerate(positives):
+        for v, val in s.vars.items():
+            if v not in lo or val < lo[v][0]:
+                lo[v] = (val, i)
+            if v not in hi or val > hi[v][0]:
+                hi[v] = (val, i)
+    idxs.update(i for _val, i in lo.values())
+    idxs.update(i for _val, i in hi.values())
+    step = max(1, len(positives) // (_MAX_FILTER_POSITIVES - len(idxs)))
+    idxs.update(range(0, len(positives), step))
+    return [positives[i] for i in sorted(idxs)]
+
+
+# Disequality atoms are checked against the FULL per-variable value sets, not
+# the state subsample: `v != c` is violated by exactly the positives where
+# v == c, and an adversary who knows the (deterministic) subsample stride can
+# pick c from the skipped states — sound-looking on the subsample, unsound in
+# truth, and it still rejects negatives sharing that value.
+_DISEQ_RE = re.compile(r"^\s*(?:!\s*\(\s*(\w+)\s*==\s*(-?\d+)\s*\)|(\w+)\s*!=\s*(-?\d+))\s*$")
+
+
 class PositiveFilter:
     """Keep invariants that are (a) in scope and (b) not violated by any positive state."""
 
     name = "positive"
 
+    def __init__(self):
+        self._rep_cache: dict = {}
+
+    def _positives(self, positives: List[State]):
+        """(representative subsample, per-var full value sets) — id-cached."""
+        key = id(positives)
+        rep = self._rep_cache.get(key)
+        if rep is None or rep[0] is not positives:
+            values: dict = {}
+            for s in positives:
+                for v, val in s.vars.items():
+                    values.setdefault(v, set()).add(val)
+            rep = (positives, representative_positives(positives), values)
+            self._rep_cache[key] = rep
+        return rep[1], rep[2]
+
     def filter(self, prog: Program, loop_idx: int, invariants: List[str],
                positives: Optional[List[State]] = None) -> List[str]:
-        positives = positives or []
+        sample, values = self._positives(positives or [])
         kept: List[str] = []
         for inv in invariants:
             cond = normalize_invariant(inv)
             if not cond:
+                continue
+            # complexity gate: drop memorization-sized predicates (see too_complex)
+            if too_complex(cond):
                 continue
             # scope gate: reject invariants naming out-of-scope identifiers
             # (Frama-C would reject them, and an undeclared name can break parsing
             #  of the whole file).
             if out_of_scope_ids(cond, prog.pre_vars):
                 continue
-            unsound = any(eval_predicate(cond, s) is False for s in positives)
+            # disequality atoms get an EXACT check against all observed values
+            m = _DISEQ_RE.match(cond)
+            if m:
+                v, c = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+                if int(c) in values.get(v, ()):
+                    continue
+            unsound = any(eval_predicate(cond, s) is False for s in sample)
             if not unsound:
                 kept.append(cond)
         return kept

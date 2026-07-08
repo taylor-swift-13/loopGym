@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, List
+import random
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +45,15 @@ class SamplerCfg(BaseModel):
     # valuations (states no execution trace produces), never derived from assert.
     n_runs: int = DEFAULT_N_RUNS
     seed: int = DEFAULT_SEED
+    # score against this many consecutive seeds and take the per-rollout MINIMUM
+    # (kills memorization of any one deterministic sample); 1 = legacy behavior
+    n_seeds: int = 2
+    # additionally score against this many HOLDOUT example sets with a fresh
+    # random seed per request (pin with holdout_seed for reproducibility): a
+    # policy that adapted to the fixed canonical seeds gains nothing — overfit
+    # boxes/farms collapse on the unseen sample while true invariants don't care
+    n_holdout: int = 1
+    holdout_seed: Optional[int] = None
 
 
 class RewardRequest(BaseModel):
@@ -51,6 +61,7 @@ class RewardRequest(BaseModel):
     rollouts: List[Any] = Field(..., description="each: {'invariants':[...]} or {'code': '...'}")
     w_base: float = 0.5
     w_marg: float = 0.5
+    w_junk: float = 0.05
     reroll_threshold: float = 0.6
     sampler: SamplerCfg = SamplerCfg()
 
@@ -61,18 +72,33 @@ class SampleRequest(BaseModel):
     show: int = 8
 
 
-def _cache_key(program: str, cfg: SamplerCfg) -> str:
-    h = hashlib.sha1((program + repr(cfg.model_dump())).encode()).hexdigest()
-    return h
+def _cache_key(program: str, n_runs: int, seed: int) -> str:
+    return hashlib.sha1(f"{program}|runs={n_runs}|seed={seed}".encode()).hexdigest()
 
 
-def _get_examples(program: str, cfg: SamplerCfg) -> ExampleSet:
-    key = _cache_key(program, cfg)
-    es = _EXAMPLE_CACHE.get(key)
-    if es is None:
-        es = ExampleSampler(program, n_runs=cfg.n_runs, seed=cfg.seed).sample()
-        _EXAMPLE_CACHE[key] = es
-    return es
+def _get_examples(program: str, cfg: SamplerCfg):
+    # one ExampleSet per scored seed, each cached independently
+    sets = []
+    for k in range(max(1, cfg.n_seeds)):
+        key = _cache_key(program, cfg.n_runs, cfg.seed + k)
+        es = _EXAMPLE_CACHE.get(key)
+        if es is None:
+            es = ExampleSampler(program, n_runs=cfg.n_runs, seed=cfg.seed + k).sample()
+            _EXAMPLE_CACHE[key] = es
+        sets.append(es)
+    for j in range(max(0, cfg.n_holdout)):
+        if cfg.holdout_seed is not None:      # pinned holdout: deterministic + cacheable
+            hs = cfg.holdout_seed + j
+            key = _cache_key(program, cfg.n_runs, hs)
+            es = _EXAMPLE_CACHE.get(key)
+            if es is None:
+                es = ExampleSampler(program, n_runs=cfg.n_runs, seed=hs).sample()
+                _EXAMPLE_CACHE[key] = es
+        else:                                 # fresh seed per request: never cached
+            es = ExampleSampler(program, n_runs=cfg.n_runs,
+                                seed=random.randrange(1 << 30)).sample()
+        sets.append(es)
+    return sets if len(sets) > 1 else sets[0]
 
 
 def build_app():
@@ -91,7 +117,7 @@ def build_app():
             examples = _get_examples(req.program, req.sampler)
             rc = RewardCalculator(
                 invariant_filter=_get_filter(),
-                w_base=req.w_base, w_marg=req.w_marg,
+                w_base=req.w_base, w_marg=req.w_marg, w_junk=req.w_junk,
                 reroll_threshold=req.reroll_threshold, logger=log,
             )
             br = rc.compute(req.program, req.rollouts, examples=examples)
@@ -105,6 +131,8 @@ def build_app():
             es = _get_examples(req.program, req.sampler)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        if isinstance(es, list):        # multi-seed config: show the first seed's set
+            es = es[0]
         out = {"program": es.program.func_name, "guard": es.program.loop.guard,
                "post": es.program.post, "loops": {}}
         for li in sorted(es.positives):

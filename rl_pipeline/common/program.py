@@ -108,6 +108,12 @@ def _strip_comments(src: str) -> str:
 
 
 def _extract_requires(src: str) -> str:
+    """All `requires <expr>;` clauses conjoined — a precondition may span several
+    clauses (`requires x>0; requires y>0;`) and dropping any of them lets
+    out-of-contract inputs poison the sampled positives."""
+    clauses = [m.group(1).strip() for m in re.finditer(r"requires\s+(.+?);", src, flags=re.DOTALL)]
+    if len(clauses) > 1:
+        return " && ".join(f"({c})" for c in clauses)
     m = re.search(r"requires\s+(.+?);", src, flags=re.DOTALL)
     if not m:
         return ""
@@ -235,7 +241,10 @@ def _find_local_inits(src: str, func_open: int, loop_start: int) -> List[Tuple[s
     region = src[func_open + 1: loop_start]
     inits: List[Tuple[str, str]] = []
     seen = set()
-    # `int|long|short <declarator-list>;` — split the list on commas
+    # `int|long|short <declarator-list>;` — split the list on commas.  A bare
+    # declarator has an UNKNOWN entry value ("") — inventing "0" here poisoned
+    # downstream entry-value reasoning whenever the real pre-loop assignment
+    # was nondeterministic (`int c; c = unknown();`).
     for m in re.finditer(r"\b(?:unsigned\s+|signed\s+)?(?:int|long|short)\s+([^;{}]+);", region):
         decls = m.group(1)
         if "(" in decls:            # skip function declarations
@@ -246,11 +255,22 @@ def _find_local_inits(src: str, func_open: int, loop_start: int) -> List[Tuple[s
                 nm, _, expr = part.partition("=")
                 nm, expr = nm.strip(), re.sub(r"\s+", " ", expr).strip()
             else:
-                nm, expr = part, "0"
+                nm, expr = part, ""
             nm = re.sub(r"\[.*\]", "", nm.lstrip("*")).strip()   # drop ptr/array decorators
             if re.fullmatch(r"\w+", nm) and nm not in seen:
                 seen.add(nm)
                 inits.append((nm, expr))
+    # pre-loop assignments override: the LAST top-level `name = expr;` before
+    # the loop is the value actually in scope at entry (`int i; ... i = 0;` ->
+    # "0").  Assignments nested in braces (pre-loop conditionals) are skipped —
+    # they are not guaranteed to execute.
+    last_assign: dict = {}
+    for m in re.finditer(r"\b(\w+)\s*=\s*([^=;][^;]*);", region):
+        prefix = region[:m.start()]
+        if prefix.count("{") != prefix.count("}"):
+            continue
+        last_assign[m.group(1)] = re.sub(r"\s+", " ", m.group(2)).strip()
+    inits = [(nm, last_assign.get(nm, expr)) for nm, expr in inits]
     return inits
 
 
