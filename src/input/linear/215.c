@@ -8,6 +8,11 @@ void foo215() {
     int RETURN;
 
 
+        exclusive = unknown();
+    invalid = unknown();
+    nonexclusive = unknown();
+    unowned = unknown();
+
     while(!((nonexclusive + unowned) >= 1 && invalid >= 1)) {
        if(invalid >= 1){
        if(unknown()){

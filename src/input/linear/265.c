@@ -1,3 +1,4 @@
+int unknown();
 /*@ requires l > 0; */
 void foo265(int l) {
 
@@ -6,6 +7,8 @@ void foo265(int l) {
 
     i = l;
 
+
+        n = unknown();
 
     while (i < n) {
        i = i + 1;

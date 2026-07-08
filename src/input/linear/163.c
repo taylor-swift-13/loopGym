@@ -1,3 +1,4 @@
+int unknown();
 /*@ requires n > 0; */
 void foo163(int n) {
 
@@ -8,6 +9,8 @@ void foo163(int n) {
     j = 0;
     b = 0;
 
+
+        flag = unknown();
 
     while(b < n){
        if(flag == 1){

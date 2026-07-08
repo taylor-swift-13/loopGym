@@ -7,6 +7,8 @@ void foo243() {
     y = 1;
 
 
+        x = unknown();
+
     while(unknown()){
        if(x % 3 == 1){
        x = x + 2;

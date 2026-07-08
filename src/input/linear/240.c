@@ -3,6 +3,9 @@ int unknown();
 void foo240(int x) {
 
     unsigned int count;
+    int exp;
+    int term;
+    int result;
 
     exp = 1;
     term = 1;

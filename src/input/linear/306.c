@@ -1,7 +1,5 @@
 /*@ requires n <= 20000001; */
 void foo306(unsigned int n) {
-
-    unsigned
     unsigned int j;
     unsigned int i;
     unsigned int l;

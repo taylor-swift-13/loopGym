@@ -5,6 +5,9 @@ void foo241(int octant, int x) {
     unsigned int count;
     int multFactor;
     int temp;
+    int oddExp;
+    int evenExp;
+    int term;
 
     octant = 3.14159 / 3;
     oddExp = x;

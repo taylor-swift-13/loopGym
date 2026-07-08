@@ -1,3 +1,4 @@
+int unknown();
 void foo162() {
 
     int k;
@@ -11,6 +12,8 @@ void foo162() {
     j = 0;
     turn = 0;
 
+
+        n = unknown();
 
     while((turn >= 0) && (turn < 3)){
        if(turn == 0 && i >= n){

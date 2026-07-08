@@ -11,6 +11,8 @@ void foo199(int k, int x, int y) {
     j = 0;
 
 
+        n = unknown();
+
     while(j < n){
        if(unknown()){
        m = j;

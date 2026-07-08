@@ -10,7 +10,10 @@ void foo200() {
 
     d1 = 1;
     d2 = 1;
-    d2 = 1;
+    d3 = 1;
+    x1 = unknown();
+    x2 = unknown();
+    x3 = unknown();
 
 
     while(x1 > 0 && x2 > 0 && x3 > 0){

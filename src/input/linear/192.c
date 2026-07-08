@@ -1,3 +1,4 @@
+int unknown();
 /*@ requires i < n; */
 void foo192(int i, int n) {
 
@@ -5,6 +6,8 @@ void foo192(int i, int n) {
 
     i = 0;
 
+
+        b = unknown();
 
     while(i < n && b != 0){
        i = i + 1;

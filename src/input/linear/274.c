@@ -1,3 +1,4 @@
+int unknown();
 void foo274() {
 
     int i;
@@ -7,6 +8,8 @@ void foo274() {
     i = 0;
     k = 0;
 
+
+        n = unknown();
 
     while (i < n) {
        i = i + 1;

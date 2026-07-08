@@ -1,4 +1,3 @@
-f
 /*@ requires a <= m;*/
 void foo108(int m,int j,int a,int c) {
 

@@ -2,7 +2,6 @@
 void foo232(unsigned int y) {
 
     unsigned int x;
-    unsigned
 
     x = 2;
 

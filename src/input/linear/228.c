@@ -1,3 +1,4 @@
+int unknown();
 void foo228() {
 
     int x;
@@ -5,6 +6,8 @@ void foo228() {
 
     x = 0;
 
+
+        y = unknown();
 
     while (x < 99) {
        if(y % 2 == 0){

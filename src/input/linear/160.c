@@ -1,3 +1,4 @@
+int unknown();
 void foo160() {
 
     int x;
@@ -5,10 +6,12 @@ void foo160() {
     int i;
     int j;
 
+    i = unknown();    j = unknown();
     x = i;
     y = j;
 
 
+    
     while(x != 0){
        x = x - 1;
        y = y - 1;

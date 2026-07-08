@@ -1,3 +1,4 @@
+int unknown();
 /*@ requires (x + y) == k; */
 void foo170(int k, int x, int y) {
 
@@ -8,6 +9,8 @@ void foo170(int k, int x, int y) {
 
     m = 0;
     j = 0;
+    n = unknown();
+    i = unknown();
 
 
     while(j < n){
@@ -15,7 +18,7 @@ void foo170(int k, int x, int y) {
        x = x + 1;
        y = y - 1;
        j = j + 1;
-       if(unkown()){
+       if(unknown()){
        m = j;
       }
       }
@@ -23,7 +26,7 @@ void foo170(int k, int x, int y) {
        x = x - 1;
        y = y + 1;
        j = j + 1;
-       if(unkown()){
+       if(unknown()){
        m = j;
       }
       }

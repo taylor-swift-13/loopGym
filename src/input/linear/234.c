@@ -1,4 +1,4 @@
-void foo234() {
+void foo234(unsigned int N) {
 
     unsigned int x;
 
