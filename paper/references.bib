@@ -1,14 +1,49 @@
 %% ============================================================
-%% References for SAM2INV paper
+%% References — loop invariant generation, loop summarization,
+%% learning-based verification, LLM+RL post-training
 %% ============================================================
 
-@inproceedings{framac,
-  author    = {Kirchner, Florent and Kosmatov, Nikolai and Prevosto, Virgile and Signoles, Julien and Yakobowski, Boris},
-  title     = {Frama-C: A Software Analysis Perspective},
-  booktitle = {Proc. Int. Conf. on Software Engineering and Formal Methods (SEFM)},
-  year      = {2015},
-  pages     = {233--247},
-  publisher = {Springer},
+%% ---------- Foundations ----------
+
+@inproceedings{floyd1967assigning,
+  author    = {Floyd, Robert W.},
+  title     = {Assigning Meanings to Programs},
+  booktitle = {Proc. Symp. in Applied Mathematics: Mathematical Aspects of Computer Science},
+  volume    = {19},
+  pages     = {19--32},
+  year      = {1967},
+}
+
+@article{hoare1969axiomatic,
+  author    = {Hoare, C. A. R.},
+  title     = {An Axiomatic Basis for Computer Programming},
+  journal   = {Communications of the ACM},
+  volume    = {12},
+  number    = {10},
+  pages     = {576--580},
+  year      = {1969},
+}
+
+@article{dijkstra1975guarded,
+  author    = {Dijkstra, Edsger W.},
+  title     = {Guarded Commands, Nondeterminacy and Formal Derivation of Programs},
+  journal   = {Communications of the ACM},
+  volume    = {18},
+  number    = {8},
+  pages     = {453--457},
+  year      = {1975},
+}
+
+%% ---------- Classical static invariant generation ----------
+
+@article{karr1976affine,
+  author    = {Karr, Michael},
+  title     = {Affine Relationships Among Variables of a Program},
+  journal   = {Acta Informatica},
+  volume    = {6},
+  number    = {2},
+  pages     = {133--151},
+  year      = {1976},
 }
 
 @inproceedings{cousot1977abstract,
@@ -17,6 +52,14 @@
   booktitle = {Proc. 4th ACM SIGACT-SIGPLAN Symp. on Principles of Programming Languages (POPL)},
   year      = {1977},
   pages     = {238--252},
+}
+
+@inproceedings{cousot1978automatic,
+  author    = {Cousot, Patrick and Halbwachs, Nicolas},
+  title     = {Automatic Discovery of Linear Restraints Among Variables of a Program},
+  booktitle = {Proc. 5th ACM SIGACT-SIGPLAN Symp. on Principles of Programming Languages (POPL)},
+  year      = {1978},
+  pages     = {84--96},
 }
 
 @inproceedings{colon2003linear,
@@ -36,19 +79,124 @@
   pages     = {318--329},
 }
 
+@inproceedings{gulwani2008program,
+  author    = {Gulwani, Sumit and Srivastava, Saurabh and Venkatesan, Ramarathnam},
+  title     = {Program Analysis as Constraint Solving},
+  booktitle = {Proc. ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)},
+  year      = {2008},
+  pages     = {281--292},
+}
+
+@inproceedings{gupta2009invgen,
+  author    = {Gupta, Ashutosh and Rybalchenko, Andrey},
+  title     = {{InvGen}: An Efficient Invariant Generator},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2009},
+  pages     = {634--640},
+  publisher = {Springer},
+}
+
+@inproceedings{dillig2013inductive,
+  author    = {Dillig, Isil and Dillig, Thomas and Li, Boyang and McMillan, Ken},
+  title     = {Inductive Invariant Generation via Abductive Inference},
+  booktitle = {Proc. ACM SIGPLAN Int. Conf. on Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA)},
+  year      = {2013},
+  pages     = {443--456},
+}
+
+@inproceedings{graf1997predicate,
+  author    = {Graf, Susanne and Sa{\"i}di, Hassen},
+  title     = {Construction of Abstract State Graphs with {PVS}},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {1997},
+  pages     = {72--83},
+  publisher = {Springer},
+}
+
+@inproceedings{ball2002slam,
+  author    = {Ball, Thomas and Rajamani, Sriram K.},
+  title     = {The {SLAM} Project: Debugging System Software via Static Analysis},
+  booktitle = {Proc. 29th ACM SIGPLAN-SIGACT Symp. on Principles of Programming Languages (POPL)},
+  year      = {2002},
+  pages     = {1--3},
+}
+
+@inproceedings{mcmillan2003interpolation,
+  author    = {McMillan, Kenneth L.},
+  title     = {Interpolation and {SAT}-Based Model Checking},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2003},
+  pages     = {1--13},
+  publisher = {Springer},
+}
+
+@inproceedings{bradley2011sat,
+  author    = {Bradley, Aaron R.},
+  title     = {{SAT}-Based Model Checking Without Unrolling},
+  booktitle = {Proc. Int. Conf. on Verification, Model Checking, and Abstract Interpretation (VMCAI)},
+  year      = {2011},
+  pages     = {70--87},
+  publisher = {Springer},
+}
+
+@inproceedings{komuravelli2014smt,
+  author    = {Komuravelli, Anvesh and Gurfinkel, Arie and Chaki, Sagar},
+  title     = {{SMT}-Based Model Checking for Recursive Programs},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2014},
+  pages     = {17--34},
+  publisher = {Springer},
+}
+
+@inproceedings{gurfinkel2015seahorn,
+  author    = {Gurfinkel, Arie and Kahsai, Temesghen and Komuravelli, Anvesh and Navas, Jorge A.},
+  title     = {The {SeaHorn} Verification Framework},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2015},
+  pages     = {343--361},
+  publisher = {Springer},
+}
+
+@inproceedings{fedyukovich2018syntax,
+  author    = {Fedyukovich, Grigory and Kaufman, Samuel J. and Bod{\'i}k, Rastislav},
+  title     = {Sampling Invariants from Frequency Distributions},
+  booktitle = {Proc. Formal Methods in Computer-Aided Design (FMCAD)},
+  year      = {2017},
+  pages     = {100--107},
+}
+
+@inproceedings{alur2013sygus,
+  author    = {Alur, Rajeev and Bod{\'i}k, Rastislav and Juniwal, Garvit and Martin, Milo M. K. and Raghothaman, Mukund and Seshia, Sanjit A. and Singh, Rishabh and Solar-Lezama, Armando and Torlak, Emina and Udupa, Abhishek},
+  title     = {Syntax-Guided Synthesis},
+  booktitle = {Proc. Formal Methods in Computer-Aided Design (FMCAD)},
+  year      = {2013},
+  pages     = {1--8},
+}
+
 @inproceedings{flanagan2001houdini,
   author    = {Flanagan, Cormac and Leino, K. Rustan M.},
   title     = {Houdini, an Annotation Assistant for {ESC/Java}},
-  booktitle = {Proc. Int. Symp. on Formal Methods Europe (FME)},
+  booktitle = {Proc. Int. Symp. of Formal Methods Europe (FME)},
   year      = {2001},
   pages     = {500--517},
   publisher = {Springer},
 }
 
-@inproceedings{daikon,
+@inproceedings{furia2010inferring,
+  author    = {Furia, Carlo Alberto and Meyer, Bertrand},
+  title     = {Inferring Loop Invariants Using Postconditions},
+  booktitle = {Fields of Logic and Computation: Essays Dedicated to Yuri Gurevich},
+  year      = {2010},
+  pages     = {277--300},
+  publisher = {Springer},
+}
+
+%% ---------- Dynamic / data-driven invariant inference ----------
+
+@article{daikon,
   author    = {Ernst, Michael D. and Perkins, Jeff H. and Guo, Philip J. and McCamant, Stephen and Pacheco, Carlos and Tschantz, Matthew S. and Xiao, Chen},
   title     = {The {Daikon} System for Dynamic Detection of Likely Invariants},
-  booktitle = {Science of Computer Programming},
+  journal   = {Science of Computer Programming},
   year      = {2007},
   volume    = {69},
   pages     = {35--45},
@@ -59,15 +207,42 @@
   title     = {Using Dynamic Analysis to Discover Polynomial and Array Invariants},
   booktitle = {Proc. 34th Int. Conf. on Software Engineering (ICSE)},
   year      = {2012},
-  pages     = {1076--1086},
+  pages     = {683--693},
 }
 
-@inproceedings{si2018learning,
-  author    = {Si, Xujie and Dai, Hanjun and Raghothaman, Mukund and Naik, Mayur and Song, Le},
-  title     = {Learning Loop Invariants for Program Verification},
-  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2018},
-  pages     = {7751--7762},
+@inproceedings{nguyen2017syminfer,
+  author    = {Nguyen, ThanhVu and Antonopoulos, Timos and Ruef, Andrew and Hicks, Michael},
+  title     = {Counterexample-Guided Approach to Finding Numerical Invariants},
+  booktitle = {Proc. 11th Joint Meeting on Foundations of Software Engineering (ESEC/FSE)},
+  year      = {2017},
+  pages     = {605--615},
+}
+
+@inproceedings{sharma2012interpolants,
+  author    = {Sharma, Rahul and Nori, Aditya V. and Aiken, Alex},
+  title     = {Interpolants as Classifiers},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2012},
+  pages     = {71--87},
+  publisher = {Springer},
+}
+
+@inproceedings{sharma2013data,
+  author    = {Sharma, Rahul and Gupta, Saurabh and Hariharan, Bharath and Aiken, Alex and Liang, Percy and Nori, Aditya V.},
+  title     = {A Data Driven Approach for Algebraic Loop Invariants},
+  booktitle = {Proc. European Symp. on Programming (ESOP)},
+  year      = {2013},
+  pages     = {574--592},
+  publisher = {Springer},
+}
+
+@inproceedings{garg2014ice,
+  author    = {Garg, Pranav and L{\"o}ding, Christof and Madhusudan, P. and Neider, Daniel},
+  title     = {{ICE}: A Robust Framework for Learning Invariants},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2014},
+  pages     = {69--87},
+  publisher = {Springer},
 }
 
 @inproceedings{garg2016learning,
@@ -78,178 +253,39 @@
   pages     = {499--512},
 }
 
-@inproceedings{chakraborty2024towards,
-  author    = {Chakraborty, Saikat and Lahiri, Shuvendu K. and Fakhoury, Sarah and Musuvathi, Madanlal and Lal, Akash and Rastogi, Aseem and Senthilnathan, Aditya and Sharma, Rahul and Swamy, Nikhil},
-  title     = {Towards Neural Synthesis for {SMT}-Assisted Proof-Oriented Programming},
-  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
-  year      = {2024},
-}
-
-@inproceedings{pei2023can,
-  author    = {Pei, Kexin and Biber, David and Shi, Kensen and Sutton, Charles and Yin, Pengcheng},
-  title     = {Can Large Language Models Reason about Program Invariants?},
-  booktitle = {Proc. Int. Conf. on Machine Learning (ICML)},
-  year      = {2023},
-}
-
-@article{kamath2023finding,
-  author    = {Kamath, Adharsh and Senthilnathan, Aditya and Chakraborty, Saikat and Deligiannis, Pantazis and Lahiri, Shuvendu K. and Lal, Akash and Rastogi, Aseem and Roy, Subhajit and Sharma, Rahul},
-  title     = {Finding Inductive Loop Invariants using Large Language Models},
-  year      = {2023},
-  journal   = {arXiv preprint arXiv:2311.07948},
-}
-
-@inproceedings{chen2021evaluating,
-  author    = {Chen, Mark and Tworek, Jerry and Jun, Heewoo and Yuan, Qiming and Pinto, Henrique Pond{\'e} de Oliveira and Kaplan, Jared and others},
-  title     = {Evaluating Large Language Models Trained on Code},
-  year      = {2021},
-  journal   = {arXiv preprint arXiv:2107.03374},
-}
-
-@inproceedings{lemieux2023codamosa,
-  author    = {Lemieux, Caroline and Inala, Jeevana Priya and Lahiri, Shuvendu K. and Sen, Siddhartha},
-  title     = {{CodaMOSA}: Escaping Coverage Plateaus in Test Generation with Pre-trained Large Language Models},
-  booktitle = {Proc. 45th Int. Conf. on Software Engineering (ICSE)},
-  year      = {2023},
-  pages     = {919--931},
-}
-
-@inproceedings{endres2024can,
-  author    = {Endres, Madeline and Fakhoury, Sarah and Chakraborty, Saikat and Lahiri, Shuvendu K.},
-  title     = {Can Large Language Models Write Specifications?},
-  booktitle = {Proc. ACM SIGSOFT Int. Symp. on Foundations of Software Engineering (FSE)},
-  year      = {2024},
-}
-
-@misc{svcomp,
-  author    = {Beyer, Dirk},
-  title     = {Competition on Software Verification ({SV-COMP})},
-  year      = {2023},
-  howpublished = {\url{https://sv-comp.sosy-lab.org/}},
-}
-
-@inproceedings{godefroid2008grammar,
-  author    = {Godefroid, Patrice and Kiezun, Adam and Levin, Michael Y.},
-  title     = {Grammar-based Whitebox Fuzzing},
+@inproceedings{padhi2016pie,
+  author    = {Padhi, Saswat and Sharma, Rahul and Millstein, Todd},
+  title     = {Data-Driven Precondition Inference with Learned Features},
   booktitle = {Proc. ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)},
-  year      = {2008},
-  pages     = {206--215},
+  year      = {2016},
+  pages     = {42--56},
 }
 
-@inproceedings{nori2015efficient,
-  author    = {Nori, Aditya V. and Ozair, Sherjil and Rajamani, Sriram K. and Viber, Deepak},
-  title     = {Efficient Synthesis of Probabilistic Programs},
+@inproceedings{zhu2018data,
+  author    = {Zhu, He and Magill, Stephen and Jagannathan, Suresh},
+  title     = {A Data-Driven {CHC} Solver},
   booktitle = {Proc. ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)},
-  year      = {2015},
-  pages     = {208--217},
+  year      = {2018},
+  pages     = {707--721},
 }
 
-@inproceedings{berdine2005smallfoot,
-  author    = {Berdine, Josh and Calcagno, Cristiano and O'Hearn, Peter W.},
-  title     = {Smallfoot: Modular Automatic Assertion Checking with Separation Logic},
-  booktitle = {Proc. Int. Symp. on Formal Methods for Components and Objects (FMCO)},
-  year      = {2005},
-  pages     = {115--137},
-  publisher = {Springer},
+@inproceedings{ezudheen2018horn,
+  author    = {Ezudheen, P. and Neider, Daniel and D'Souza, Deepak and Garg, Pranav and Madhusudan, P.},
+  title     = {Horn-{ICE} Learning for Synthesizing Invariants and Contracts},
+  booktitle = {Proc. ACM SIGPLAN Int. Conf. on Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA)},
+  year      = {2018},
+  pages     = {131:1--131:25},
 }
 
-@inproceedings{han2021proof,
-  author    = {Han, Jesse Michael and Rabe, Floris and Wang, Yuhuai and Szegedy, Christian and Szegedy, Christian},
-  title     = {Proof Artifact Co-Training},
-  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
-  year      = {2022},
-}
+%% ---------- Neural invariant generation (pre-LLM) ----------
 
-@inproceedings{jiang2022draft,
-  author    = {Jiang, Albert Q. and Welleck, Sean and Zhou, Jin Peng and Li, Wenda and Liu, Jiacheng and Jamnik, Mateja and Lacroix, Timoth{\'e}e and Wu, Yuhuai and Lample, Guillaume},
-  title     = {Draft, Sketch, and Prove: Guiding Formal Theorem Provers with Informal Proofs},
-  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
-  year      = {2023},
-}
-
-@inproceedings{wu2022autoformalization,
-  author    = {Wu, Yuhuai and Jiang, Albert Q. and Li, Wenda and Rabe, Markus N. and Staats, Charles and Szegedy, Christian and Szegedy, Christian},
-  title     = {Autoformalization with Large Language Models},
+@inproceedings{si2018learning,
+  author    = {Si, Xujie and Dai, Hanjun and Raghothaman, Mukund and Naik, Mayur and Song, Le},
+  title     = {Learning Loop Invariants for Program Verification},
   booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2022},
+  year      = {2018},
+  pages     = {7751--7762},
 }
-
-@inproceedings{lample2022hypertree,
-  author    = {Lample, Guillaume and Lacroix, Timoth{\'e}e and Lachaux, Marie-Anne and Rodriguez, Aurelien and Hayat, Amaury and Lavril, Thibaut and Ebner, Gabriel and Martinet, Xavier},
-  title     = {{HyperTree} Proof Search for Neural Theorem Proving},
-  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2022},
-}
-
-@inproceedings{polu2022formal,
-  author    = {Polu, Sorin and Han, Jesse Michael and Zheng, Kunhao and Baksys, Mantas and Babuschkin, Igor and Sutskever, Ilya},
-  title     = {Formal Mathematics Statement Curriculum Learning},
-  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
-  year      = {2023},
-}
-
-@article{li2022competition,
-  author    = {Li, Yujia and Choi, David and Chung, Junyoung and Kushman, Nate and Schrittwieser, Julian and Leblond, R{\'e}mi and Eccles, Tom and Keeling, James and Gimeno, Felix and Dal Lago, Agustin and others},
-  title     = {Competition-Level Code Generation with {AlphaCode}},
-  journal   = {Science},
-  year      = {2022},
-  volume    = {378},
-  number    = {6624},
-  pages     = {1092--1097},
-}
-
-@inproceedings{ouyang2022training,
-  author    = {Ouyang, Long and Wu, Jeff and Jiang, Xu and Almeida, Diogo and Wainwright, Carroll L. and Mishkin, Pamela and Zhang, Chong and Agarwal, Sandhini and Slama, Katarina and Ray, Alex and others},
-  title     = {Training Language Models to Follow Instructions with Human Feedback},
-  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2022},
-}
-
-@inproceedings{rafailov2023direct,
-  author    = {Rafailov, Rafael and Sharma, Archit and Mitchell, Eric and Ermon, Stefano and Manning, Christopher D. and Finn, Chelsea},
-  title     = {Direct Preference Optimization: Your Language Model Is Secretly a Reward Model},
-  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2023},
-}
-
-@article{deepseekr1,
-  author    = {{DeepSeek-AI}},
-  title     = {{DeepSeek-R1}: Incentivizing Reasoning Capability in {LLMs} via Reinforcement Learning},
-  journal   = {arXiv preprint arXiv:2501.12948},
-  year      = {2025},
-}
-
-@article{lambert2024tulu,
-  author    = {Lambert, Nathan and Morrison, Jacob and Pyatkin, Valentina and Huang, Shengding and Ivison, Hamish and Brahman, Faeze and Miranda, Lester James Validad and Pyatkin, Valentina and others},
-  title     = {{T{\"U}LU} 3: Pushing Frontiers in Open Language Model Post-Training},
-  journal   = {arXiv preprint arXiv:2411.15124},
-  year      = {2024},
-}
-
-@inproceedings{le2022coderl,
-  author    = {Le, Hung and Wang, Yue and Gotmare, Akhilesh Deepak and Savarese, Silvio and Hoi, Steven C. H.},
-  title     = {{CodeRL}: Mastering Code Generation through Pretrained Models and Deep Reinforcement Learning},
-  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2022},
-}
-
-@article{gehring2024rlef,
-  author    = {Gehring, Jonas and Zheng, Kunhao and Copet, Jade and Mella, Vegard and Carbonell, Taco Cohen and others},
-  title     = {{RLEF}: Grounding Code {LLMs} in Execution Feedback with Reinforcement Learning},
-  journal   = {arXiv preprint arXiv:2410.02089},
-  year      = {2024},
-}
-
-@inproceedings{lightman2023lets,
-  author    = {Lightman, Hunter and Kosaraju, Vineet and Burda, Yura and Edwards, Harri and Baker, Bowen and Lee, Teddy and Leike, Jan and Schulman, John and Sutskever, Ilya and Cobbe, Karl},
-  title     = {Let's Verify Step by Step},
-  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
-  year      = {2024},
-}
-
-%% ============================================================
-%% New references for expanded Related Work
-%% ============================================================
 
 @inproceedings{si2020code2inv,
   author    = {Si, Xujie and Naik, Aaditya and Dai, Hanjun and Naik, Mayur and Song, Le},
@@ -267,30 +303,276 @@
   year      = {2020},
 }
 
-@article{mukherjee2023orca,
-  author    = {Mukherjee, Subhabrata and Mitra, Arindam and Jawahar, Ganesh and Agarwal, Sahaj and Palangi, Hamid and Awadallah, Ahmed},
-  title     = {Orca: Progressive Learning from Complex Explanation Traces of {GPT-4}},
-  journal   = {arXiv preprint arXiv:2306.02707},
+@inproceedings{yao2020gcln,
+  author    = {Yao, Jianan and Ryan, Gabriel and Wong, Justin and Jana, Suman and Gu, Ronghui},
+  title     = {Learning Nonlinear Loop Invariants with Gated Continuous Logic Networks},
+  booktitle = {Proc. ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)},
+  year      = {2020},
+  pages     = {106--120},
+}
+
+%% ---------- Loop summarization / acceleration ----------
+
+@inproceedings{kroening2008loop,
+  author    = {Kroening, Daniel and Sharygina, Natasha and Tonetta, Stefano and Tsitovich, Aliaksei and Wintersteiger, Christoph M.},
+  title     = {Loop Summarization Using Abstract Transformers},
+  booktitle = {Proc. Int. Symp. on Automated Technology for Verification and Analysis (ATVA)},
+  year      = {2008},
+  pages     = {111--125},
+  publisher = {Springer},
+}
+
+@inproceedings{godefroid2011automatic,
+  author    = {Godefroid, Patrice and Luchaup, Daniel},
+  title     = {Automatic Partial Loop Summarization in Dynamic Test Generation},
+  booktitle = {Proc. Int. Symp. on Software Testing and Analysis (ISSTA)},
+  year      = {2011},
+  pages     = {23--33},
+}
+
+@inproceedings{xie2016proteus,
+  author    = {Xie, Xiaofei and Chen, Bihuan and Liu, Yang and Le, Wei and Li, Xiaohong},
+  title     = {Proteus: Computing Disjunctive Loop Summary via Path Dependency Analysis},
+  booktitle = {Proc. ACM SIGSOFT Int. Symp. on Foundations of Software Engineering (FSE)},
+  year      = {2016},
+  pages     = {61--72},
+}
+
+@inproceedings{farzan2015compositional,
+  author    = {Farzan, Azadeh and Kincaid, Zachary},
+  title     = {Compositional Recurrence Analysis},
+  booktitle = {Proc. Formal Methods in Computer-Aided Design (FMCAD)},
+  year      = {2015},
+  pages     = {57--64},
+}
+
+@inproceedings{kincaid2017compositional,
+  author    = {Kincaid, Zachary and Breck, Jason and Forouhi Boroujeni, Ashkan and Reps, Thomas},
+  title     = {Compositional Recurrence Analysis Revisited},
+  booktitle = {Proc. ACM SIGPLAN Conf. on Programming Language Design and Implementation (PLDI)},
+  year      = {2017},
+  pages     = {248--262},
+}
+
+@article{bardin2008fast,
+  author    = {Bardin, S{\'e}bastien and Finkel, Alain and Leroux, J{\'e}r{\^o}me and Petrucci, Laure},
+  title     = {{FAST}: Acceleration from Theory to Practice},
+  journal   = {International Journal on Software Tools for Technology Transfer},
+  volume    = {10},
+  number    = {5},
+  pages     = {401--424},
+  year      = {2008},
+}
+
+%% ---------- LLMs for invariants & specifications ----------
+
+@inproceedings{pei2023can,
+  author    = {Pei, Kexin and Bieber, David and Shi, Kensen and Sutton, Charles and Yin, Pengcheng},
+  title     = {Can Large Language Models Reason about Program Invariants?},
+  booktitle = {Proc. Int. Conf. on Machine Learning (ICML)},
   year      = {2023},
 }
 
-@article{luo2023wizardmath,
-  author    = {Luo, Haipeng and Sun, Qingfeng and Xu, Can and Zhao, Pu and Lou, Jianguang and Tao, Chongyang and Geng, Xiubo and Lin, Qingwei and Chen, Shifeng and Zhang, Dongmei},
-  title     = {{WizardMath}: Empowering Mathematical Reasoning for Large Language Models via Reinforced Evol-Instruct},
-  journal   = {arXiv preprint arXiv:2308.09583},
+@article{kamath2023finding,
+  author    = {Kamath, Adharsh and Senthilnathan, Aditya and Chakraborty, Saikat and Deligiannis, Pantazis and Lahiri, Shuvendu K. and Lal, Akash and Rastogi, Aseem and Roy, Subhajit and Sharma, Rahul},
+  title     = {Finding Inductive Loop Invariants using Large Language Models},
   year      = {2023},
+  journal   = {arXiv preprint arXiv:2311.07948},
 }
 
-@article{yuan2023scaling,
-  author    = {Yuan, Zheng and Yuan, Hongyi and Li, Chengpeng and Dong, Guanting and Lu, Keming and Tan, Chuanqi and Zhou, Chang and Zhou, Jingren},
-  title     = {Scaling Relationship on Learning Mathematical Reasoning with Large Language Models},
-  journal   = {arXiv preprint arXiv:2308.01825},
+@inproceedings{chakraborty2023ranking,
+  author    = {Chakraborty, Saikat and Lahiri, Shuvendu K. and Fakhoury, Sarah and Musuvathi, Madanlal and Lal, Akash and Rastogi, Aseem and Senthilnathan, Aditya and Sharma, Rahul and Swamy, Nikhil},
+  title     = {Ranking {LLM}-Generated Loop Invariants for Program Verification},
+  booktitle = {Findings of the Association for Computational Linguistics: EMNLP},
   year      = {2023},
+  pages     = {9164--9175},
 }
 
-@inproceedings{yue2024mammoth,
-  author    = {Yue, Xiang and Qu, Xingwei and Zhang, Ge and Fu, Yao and Huang, Wenhao and Sun, Huan and Su, Yu and Chen, Wenhu},
-  title     = {{MAmmoTH}: Building Math Generalist Models through Hybrid Instruction Tuning},
+@inproceedings{wu2024lemur,
+  author    = {Wu, Haoze and Barrett, Clark and Narodytska, Nina},
+  title     = {Lemur: Integrating Large Language Models in Automated Program Verification},
   booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
   year      = {2024},
+}
+
+@inproceedings{wen2024enchanting,
+  author    = {Wen, Cheng and Cao, Jialun and Su, Jie and Xu, Zhiwu and Qin, Shengchao and He, Mengda and Li, Haokun and Cheung, Shing-Chi and Tian, Cong},
+  title     = {Enchanting Program Specification Synthesis by Large Language Models Using Static Analysis and Program Verification},
+  booktitle = {Proc. Int. Conf. on Computer Aided Verification (CAV)},
+  year      = {2024},
+  pages     = {302--328},
+  publisher = {Springer},
+}
+
+@inproceedings{ma2024specgen,
+  author    = {Ma, Lezhi and Liu, Shangqing and Li, Yi and Xie, Xiaofei and Bu, Lei},
+  title     = {{SpecGen}: Automated Generation of Formal Program Specifications via Large Language Models},
+  booktitle = {Proc. Int. Conf. on Software Engineering (ICSE)},
+  year      = {2025},
+}
+
+@inproceedings{liu2024towards,
+  author    = {Liu, Chang and Wu, Xiwei and Feng, Yuan and Cao, Qinxiang and Yan, Junchi},
+  title     = {Towards General Loop Invariant Generation: A Benchmark of Programs with Memory Manipulation},
+  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2024},
+}
+
+@inproceedings{chakraborty2024towards,
+  author    = {Chakraborty, Saikat and Ebner, Gabriel and Bhat, Siddharth and Fakhoury, Sarah and Fatima, Sakina and Lahiri, Shuvendu K. and Swamy, Nikhil},
+  title     = {Towards Neural Synthesis for {SMT}-Assisted Proof-Oriented Programming},
+  booktitle = {Proc. Int. Conf. on Software Engineering (ICSE)},
+  year      = {2025},
+}
+
+@inproceedings{endres2024can,
+  author    = {Endres, Madeline and Fakhoury, Sarah and Chakraborty, Saikat and Lahiri, Shuvendu K.},
+  title     = {Can Large Language Models Transform Natural Language Intent into Formal Method Postconditions?},
+  booktitle = {Proc. ACM SIGSOFT Int. Symp. on Foundations of Software Engineering (FSE)},
+  year      = {2024},
+}
+
+@inproceedings{first2023baldur,
+  author    = {First, Emily and Rabe, Markus N. and Ringer, Talia and Brun, Yuriy},
+  title     = {Baldur: Whole-Proof Generation and Repair with Large Language Models},
+  booktitle = {Proc. 31st ACM Joint European Software Engineering Conf. and Symp. on the Foundations of Software Engineering (ESEC/FSE)},
+  year      = {2023},
+  pages     = {1229--1241},
+}
+
+@inproceedings{misu2024towards,
+  author    = {Misu, Md Rakib Hossain and Lopes, Cristina V. and Ma, Iris and Noble, James},
+  title     = {Towards {AI}-Assisted Synthesis of Verified {Dafny} Methods},
+  booktitle = {Proc. ACM SIGSOFT Int. Symp. on Foundations of Software Engineering (FSE)},
+  year      = {2024},
+}
+
+%% ---------- Tools / benchmarks ----------
+
+@article{framac,
+  author    = {Kirchner, Florent and Kosmatov, Nikolai and Prevosto, Virgile and Signoles, Julien and Yakobowski, Boris},
+  title     = {Frama-C: A Software Analysis Perspective},
+  journal   = {Formal Aspects of Computing},
+  volume    = {27},
+  number    = {3},
+  pages     = {573--609},
+  year      = {2015},
+}
+
+@misc{acsl,
+  author    = {Baudin, Patrick and Cuoq, Pascal and Filli{\^a}tre, Jean-Christophe and March{\'e}, Claude and Monate, Benjamin and Moy, Yannick and Prevosto, Virgile},
+  title     = {{ACSL}: {ANSI/ISO} {C} Specification Language},
+  howpublished = {\url{https://frama-c.com/html/acsl.html}},
+  year      = {2021},
+}
+
+@misc{svcomp,
+  author    = {Beyer, Dirk},
+  title     = {Competition on Software Verification ({SV-COMP})},
+  year      = {2023},
+  howpublished = {\url{https://sv-comp.sosy-lab.org/}},
+}
+
+@article{nla2019,
+  author    = {Nguyen, ThanhVu and Nguyen, KimHao and Dwyer, Matthew B.},
+  title     = {Using Symbolic States to Infer Numerical Invariants},
+  journal   = {IEEE Transactions on Software Engineering},
+  volume    = {48},
+  number    = {10},
+  pages     = {3877--3899},
+  year      = {2022},
+}
+
+%% ---------- LLM post-training: RL, reward modeling, hacking ----------
+
+@article{chen2021evaluating,
+  author    = {Chen, Mark and Tworek, Jerry and Jun, Heewoo and Yuan, Qiming and Pinto, Henrique Pond{\'e} de Oliveira and Kaplan, Jared and others},
+  title     = {Evaluating Large Language Models Trained on Code},
+  year      = {2021},
+  journal   = {arXiv preprint arXiv:2107.03374},
+}
+
+@inproceedings{ouyang2022training,
+  author    = {Ouyang, Long and Wu, Jeff and Jiang, Xu and Almeida, Diogo and Wainwright, Carroll L. and Mishkin, Pamela and Zhang, Chong and Agarwal, Sandhini and Slama, Katarina and Ray, Alex and others},
+  title     = {Training Language Models to Follow Instructions with Human Feedback},
+  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022},
+}
+
+@article{schulman2017ppo,
+  author    = {Schulman, John and Wolski, Filip and Dhariwal, Prafulla and Radford, Alec and Klimov, Oleg},
+  title     = {Proximal Policy Optimization Algorithms},
+  journal   = {arXiv preprint arXiv:1707.06347},
+  year      = {2017},
+}
+
+@article{shao2024deepseekmath,
+  author    = {Shao, Zhihong and Wang, Peiyi and Zhu, Qihao and Xu, Runxin and Song, Junxiao and Bi, Xiao and Zhang, Haowei and Zhang, Mingchuan and Li, Y. K. and Wu, Y. and Guo, Daya},
+  title     = {{DeepSeekMath}: Pushing the Limits of Mathematical Reasoning in Open Language Models},
+  journal   = {arXiv preprint arXiv:2402.03300},
+  year      = {2024},
+}
+
+@article{deepseekr1,
+  author    = {{DeepSeek-AI}},
+  title     = {{DeepSeek-R1}: Incentivizing Reasoning Capability in {LLMs} via Reinforcement Learning},
+  journal   = {arXiv preprint arXiv:2501.12948},
+  year      = {2025},
+}
+
+@article{lambert2024tulu,
+  author    = {Lambert, Nathan and Morrison, Jacob and Pyatkin, Valentina and Huang, Shengyi and Ivison, Hamish and Brahman, Faeze and Miranda, Lester James V. and others},
+  title     = {{T{\"u}lu} 3: Pushing Frontiers in Open Language Model Post-Training},
+  journal   = {arXiv preprint arXiv:2411.15124},
+  year      = {2024},
+}
+
+@inproceedings{le2022coderl,
+  author    = {Le, Hung and Wang, Yue and Gotmare, Akhilesh Deepak and Savarese, Silvio and Hoi, Steven C. H.},
+  title     = {{CodeRL}: Mastering Code Generation through Pretrained Models and Deep Reinforcement Learning},
+  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022},
+}
+
+@article{gehring2024rlef,
+  author    = {Gehring, Jonas and Zheng, Kunhao and Copet, Jade and Mella, Vegard and Cohen, Taco and Synnaeve, Gabriel},
+  title     = {{RLEF}: Grounding Code {LLMs} in Execution Feedback with Reinforcement Learning},
+  journal   = {arXiv preprint arXiv:2410.02089},
+  year      = {2024},
+}
+
+@inproceedings{lightman2023lets,
+  author    = {Lightman, Hunter and Kosaraju, Vineet and Burda, Yura and Edwards, Harri and Baker, Bowen and Lee, Teddy and Leike, Jan and Schulman, John and Sutskever, Ilya and Cobbe, Karl},
+  title     = {Let's Verify Step by Step},
+  booktitle = {Proc. Int. Conf. on Learning Representations (ICLR)},
+  year      = {2024},
+}
+
+@inproceedings{skalse2022defining,
+  author    = {Skalse, Joar and Howe, Nikolaus H. R. and Krasheninnikov, Dmitrii and Krueger, David},
+  title     = {Defining and Characterizing Reward Gaming},
+  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022},
+}
+
+@inproceedings{gao2023scaling,
+  author    = {Gao, Leo and Schulman, John and Hilton, Jacob},
+  title     = {Scaling Laws for Reward Model Overoptimization},
+  booktitle = {Proc. Int. Conf. on Machine Learning (ICML)},
+  year      = {2023},
+  pages     = {10835--10866},
+}
+
+@article{amodei2016concrete,
+  author    = {Amodei, Dario and Olah, Chris and Steinhardt, Jacob and Christiano, Paul and Schulman, John and Man{\'e}, Dan},
+  title     = {Concrete Problems in {AI} Safety},
+  journal   = {arXiv preprint arXiv:1606.06565},
+  year      = {2016},
+}
+
+@inproceedings{rafailov2023direct,
+  author    = {Rafailov, Rafael and Sharma, Archit and Mitchell, Eric and Ermon, Stefano and Manning, Christopher D. and Finn, Chelsea},
+  title     = {Direct Preference Optimization: Your Language Model Is Secretly a Reward Model},
+  booktitle = {Proc. Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
 }

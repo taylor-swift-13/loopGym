@@ -4,206 +4,104 @@
 
 %% ---- Notation ----
 \paragraph{Notation.}
-A program $P = (\phi_{\mathrm{pre}}, G, B, \phi_{\mathrm{post}})$
-has variables $V$, precondition $\phi_{\mathrm{pre}}$, guard $G$,
-body $B$, and postcondition $\phi_{\mathrm{post}}$.
-An execution trace $\tau = (\sigma_0, \dots, \sigma_T)$ records
-per-iteration states $\sigma_t : V \to \mathbb{Z}$.
-A candidate invariant $I = c_1 \wedge \cdots \wedge c_k$ is
-\emph{inductive} (written $\mathrm{Ind}(I,P)$) if
-$\phi_{\mathrm{pre}} \Rightarrow I$,\;
-$I \wedge G \wedge B \Rightarrow I'$,\; and
-$I \wedge \neg G \Rightarrow \phi_{\mathrm{post}}$.
+For a program $P = (\phi_{\mathrm{pre}}, B, S)$, a \emph{rollout} $A = \{e_1, \dots, e_k\}$ is one candidate clause set produced by one policy sample; a \emph{group} $\mathcal{A} = \{A_1, \dots, A_G\}$ is the set of rollouts sampled for $P$ in one RL step.
+The sampler emits an example set $E = (\mathcal{P}, \mathcal{N})$: positives $\mathcal{P}$ (reachable loop-head states) and negatives $\mathcal{N}$ grouped into \emph{trace units}---each unit is one impossible history, witnessed by one or more states.
+$\mathrm{surv}(A) \subseteq A$ denotes the subset of $A$ surviving the filter cascade (complexity gate, scope check, positive-soundness, Houdini induction; $\S$\ref{sec:method:reward}).
+A clause set \emph{rejects} a trace unit iff some surviving clause evaluates to false on some witness state of that unit; $\mathrm{rej}(X) \subseteq \mathcal{N}$ is the set of units rejected by clause set $X$.
 
-%% ------------------------------------------------------------
-\subsection{Loop Context Construction}\label{sec:loop-context}
-%% ------------------------------------------------------------
+%% ============================================================
+\subsection{Sampler: Positives and Truthful Negatives}
+\label{sec:method:sampler}
 
-Before calling the LLM, we assemble a structured \emph{loop context}
-that provides all information needed for invariant synthesis.
-A lightweight static pre-pass (\texttt{LoopAnalysis}) extracts a
-per-loop \emph{record} $\mathbf{r}_i$ containing:
-(i)~the loop guard and body code snippet,
-(ii)~the set of modified variables $V_{\mathrm{mod}}$ and unmodified
-     function parameters $\mathcal{P}$,
-(iii)~conservative integer bounds on each variable, and
-(iv)~the loop entry pre-condition $\phi_{\mathrm{pre}}$.
+The sampler is the semantic ground truth of the system, and it is deliberately \emph{blind to the postcondition}: it parses only the precondition, guard, and body.
 
-A symbolic execution pass then enriches each record with a
-\emph{transition relation}: for each variable the pass computes the
-one-step mapping $v \mapsto e'(v, \mathcal{P})$ under the loop guard,
-distinguishing changed variables from unchanged ones.
-This gives the LLM a concise algebraic view of the loop body beyond
-raw source code.
+\paragraph{Positives by concrete execution.}
+The loop is instrumented with prints at loop entry, at the top of every iteration, and after exit, then compiled with \texttt{gcc} and executed.
+Inputs are swept deterministically over a 20-tier magnitude schedule (edge values $0, \pm1, 2, 3$ through moderate magnitudes, clamped to declared per-parameter bounds), in three phases: seed-hashed \emph{far probes} (magnitudes up to 512, cube-safe against 32-bit overflow), \emph{stripes} (all parameters move together), and a mixed-radix \emph{grid} (tier combinations, so parameter-coupling preconditions such as $z = k$ receive satisfying tuples).
+Every tuple is checked against the full precondition before use---out-of-contract inputs would poison the positive set.
+Nondeterministic calls (\texttt{unknown()}) are auto-defined as seeded random oracles so repeated runs explore distinct branches.
+Loops run to their \emph{real} exit; print throttling keeps long loops cheap while keeping trace windows dense, and a run that hits the iteration cap is flagged so that no range conclusion is drawn from a truncated trace.
 
-The final prompt concatenates four components:
-(i)~the ACSL pre-condition $\phi_{\mathrm{pre}}$,
-(ii)~the transition relation summary,
-(iii)~the loop code snippet, and
-(iv)~execution traces with temporal labels (\textsc{Before} iteration
-     / \textsc{After} termination) emphasising that invariants must
-     hold at the \emph{start} of every iteration.
-Available variables and function parameters (supporting
-\lstinline|\at(var, Pre)| references) are listed explicitly so that
-the LLM only uses well-scoped identifiers.
-The full prompt template is given in Appendix~\ref{app:prompts}.
+\paragraph{Truthful negatives.}
+A negative that is actually reachable would penalize exactly the true invariants, so every negative must be \emph{provably impossible}---truthful by construction, derived from the loop's own dynamics rather than from executing mutated code.
+Negatives come in two balanced dimensions:
 
-%% ------------------------------------------------------------
-\subsection{Parallel LLM Generation}\label{sec:generation}
-%% ------------------------------------------------------------
-
-We issue $N$ parallel calls to the teacher $\mathcal{M}_T$ with
-temperatures drawn from $\{0.8, 1.0, 1.1, 1.2\}$.
-Each call $j$ returns $r_j = (\rho_j, I_j)$: a CoT reasoning trace
-$\rho_j$ and a candidate invariant $I_j$.
-Candidates are decomposed into conjuncts and unioned:
-\begin{equation}\label{eq:pool}
-C_{\mathrm{pool}} = \bigcup_{j=1}^{N}
-  \mathrm{conjuncts}(I_j)
-  \;\big/\; {\sim_{\mathrm{ws}}}
-\end{equation}
-where $\sim_{\mathrm{ws}}$ is whitespace-normalised string equality.
-The union exploits the conjunctive structure of invariants: distinct
-calls discover complementary conjuncts.
-Prompt design and temperature strategy are detailed in
-Appendix~\ref{app:prompts}.
-
-%% ------------------------------------------------------------
-\subsection{Multi-Stage Filtering}\label{sec:filtering}
-%% ------------------------------------------------------------
-
-The pool is refined through five stages of increasing cost:
-\[
-C_{\mathrm{pool}}
-\xrightarrow{F_1} C_1
-\xrightarrow{F_2} C_2
-\xrightarrow{F_3} C_3
-\xrightarrow{F_4} C_4
-\xrightarrow{F_5} C^*
-\]
-
-Algorithm~\ref{alg:pipeline} presents the complete procedure.
-
-\begin{algorithm}[t]
-\caption{\sam{} Pipeline}\label{alg:pipeline}
-\rule{\linewidth}{0.4pt}
-\begin{algorithmic}
-\alginput{Program $P$, teacher $\mathcal{M}_T$, verifier $\mathcal{V}$, quality judge $\mathcal{M}_Q$}
-\algoutput{Certified invariant $C^*$ or $\bot$; training records}
-\algblank
-\algline $\mathcal{T} \leftarrow \textsc{TieredSample}(P)$ \cmnt{Phase I}\\
-\algline \kw{for} $j = 1,\dots,N$ \kw{in parallel do}\\
-\algline \algind $(\rho_j, I_j) \leftarrow \mathcal{M}_T(P, \mathcal{T}, t_j)$\\
-\algline $C_{\mathrm{pool}} \leftarrow \bigcup_j \mathrm{conjuncts}(I_j) \;/\; {\sim_{\mathrm{ws}}}$\\
-\algblank
-\algline $C_1 \leftarrow \{c \in C_{\mathrm{pool}} \mid \mathrm{SynValid}(c)\}$ \cmnt{$F_1$: syntax}\\
-\algline $C_2 \leftarrow \{c \in C_1 \mid \forall\sigma\in\mathcal{T}:\,\sigma\models c\}$ \cmnt{$F_2$: trace}\\
-\algline $C_3 \leftarrow \mathrm{SemDedup}(C_2)$ \cmnt{$F_3$: dedup}\\
-\algblank
-\algline $S \leftarrow C_3$ \cmnt{$F_4$: Houdini}\\
-\algline \kw{repeat}\\
-\algline \algind $R \leftarrow \{c \in S \mid \mathcal{V}(P,\textstyle\bigwedge S, c) = \mathit{fail}\}$\\
-\algline \algind $S \leftarrow S \setminus R$\\
-\algline \kw{until} $R = \emptyset$ \kw{or} $S = \emptyset$\\
-\algline $C_4 \leftarrow S$\\
-\algblank
-\algline $C^* \leftarrow C_4$ \kw{if} $\mathcal{M}_Q(P,C_4) = \textsc{ok}$, else $\emptyset$ \cmnt{$F_5$: trivial}\\
-\algblank
-\algline $\rho^* \leftarrow \mathcal{M}_R(P, C^*)$ \cmnt{reverse CoT}\\
-\algline \kw{return} $C^*$,\; $y^+ = (\rho^*, C^*)$,\; $\{y^-\} = C_{\mathrm{pool}} \setminus C^*$
-\end{algorithmic}
-\rule{\linewidth}{0.4pt}
-\end{algorithm}
-
-\paragraph{$F_1$: Syntax filter.}
-$C_1 = \{c \in C_{\mathrm{pool}} \mid \mathrm{SynValid}(c)\}$
-checks ACSL structural rules (Appendix~\ref{app:syntax-gate}).
-Cost: $O(|c|)$ per conjunct.
-
-\paragraph{$F_2$: Trace semantic filter.}
-$C_2 = \{c \in C_1 \mid
-  \forall\tau\!\in\!\mathcal{T},\,
-  \forall\sigma\!\in\!\tau:\,\sigma \models c\}$.
-Sound (no true invariant removed) but incomplete.
-
-\paragraph{$F_3$: Semantic deduplication.}
-An auxiliary LLM identifies equivalence classes under logical
-equivalence $\equiv_{\mathrm{sem}}$ and retains one representative
-per class:
-$C_3 = \{\mathrm{repr}([c]_{\equiv_{\mathrm{sem}}}) \mid c \in C_2\}$.
-
-\paragraph{$F_4$: Houdini pruning.}
-The Houdini algorithm~\citep{flanagan2001houdini} iteratively removes
-conjuncts whose verification conditions fail in Frama-C/WP until a
-fixed point $C_4$.
-
-\begin{theorem}[Termination]\label{thm:termination}
-Houdini terminates in $\le |C_3|$ iterations, removing $\ge 1$
-conjunct per round.
-\end{theorem}
-
-\paragraph{$F_5$: Trivial invariant filter.}
-A quality discriminator $\mathcal{M}_Q$ excludes invariants that are
-formally correct but semantically vacuous, preventing reward hacking.
-
-%% ------------------------------------------------------------
-\subsection{Reverse Chain-of-Thought}\label{sec:reverse-cot}
-%% ------------------------------------------------------------
-
-The certified $C^*$ is assembled from fragments of multiple teacher
-responses and differs from any single $I_j$.
-A reverse CoT model $\mathcal{M}_R$ synthesises a matching reasoning
-chain:
-$\rho^* = \mathcal{M}_R(P, C^*)$,
-ensuring every training sample is a complete $(\rho, I)$ pair.
-
-%% ------------------------------------------------------------
-\subsection{Offline Knowledge Distillation}\label{sec:offline}
-%% ------------------------------------------------------------
-
-For each program $P$ the pipeline yields:
-\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{Chosen}: $y^+ = (\rho^*, C^*)$ --- certified invariant
-  with reverse CoT.
-\item \textbf{Rejected}: $\{y^-_s\}$ --- every candidate eliminated
-  at stage $s$.
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt, topsep=2pt]
+\item \textbf{Relational negatives} expose missing laws ($x + y = n$, $z = x \cdot y$).
+Small single-axis and pairwise perturbations ($\pm\{1,2,3\}$) are applied to \emph{dense bases}: trace states whose next $w = 4$ successors were all sampled, so every reachable in-window neighbor is known and a surviving perturbation is genuinely off the reachable manifold.
+\item \textbf{Bound negatives} expose missing range facts.
+\emph{Over-run states} execute the real body up to 24 steps past a genuine exit: they preserve every (even non-linear) relational law while violating the range, and each over-run continuation forms \emph{one} trace unit.
+\emph{Box-escape states} take large ladder steps ($\pm\{5, 8, 13, 21, 34, 55, 89\}$) kept only when they leave the variable's observed range.
 \end{itemize}
 
-\paragraph{Data augmentation.}
-(i)~\emph{Off-policy conjunct recombination}
-(Algorithm~\ref{alg:aug-mixed}): the pipeline collects a
-\emph{negative pool} $B$ of every conjunct rejected at any stage
-(syntax, trace, Houdini).
-Rejected variants are constructed by independently sampling a
-subset of correct conjuncts and a subset of incorrect ones,
-subject to the constraint that the result is not equivalent to
-the chosen annotation (Appendix~\ref{app:dpo-aug}).
-(ii)~\emph{On-policy negatives}: the student $\mathcal{M}_S$
-generates candidates through the same pipeline; failures serve as
-targeted rejected samples close to the student's current distribution.
+Perturbed states that could constitute a fresh loop entry (parameters at their pre-values, literal-initialized locals at their initializers, precondition satisfied) are reachable and are dropped.
+Under nondeterminism the sampler degrades soundly rather than optimistically: a nondeterministic guard disables the entire bound dimension (the loop can always run longer); nondet-tainted variables are never perturbed directly, but sound signal is \emph{rescued} for them via conserved rigid pairs ($c_w v - c_v w$), gcd-lattice residues ($v \equiv v_0 \pmod g$), monotone floors/ceilings, and guard-implied bounds---each a provably sound fact even when no reachable range exists.
 
-\paragraph{Two-stage training.}
-\emph{SFT} minimises negative log-likelihood on chosen samples:
-\begin{equation}\label{eq:sft}
-\mathcal{L}_{\mathrm{SFT}} =
-  -\!\sum_{(P,y^+)}\!
-  \log \pi_\theta(y^+ \mid P).
+\paragraph{Trace-unit accounting.}
+Negatives are counted per impossible \emph{history}, not per state: an over-run trajectory contributes one unit no matter how many witness states it carries, and a unit is rejected if any witness is.
+This prevents count inflation from long continuations and makes the reward's denominator semantically meaningful.
+
+%% ============================================================
+\subsection{Reward: Dense Scoring of Summary Tightness}
+\label{sec:method:reward}
+
+Given a program, a group $\mathcal{A}$, and an example set $E$, each rollout is scored in three steps.
+
+\paragraph{Step 1: survival.}
+$A \mapsto \mathrm{surv}(A)$ applies, in order: a per-clause \emph{complexity gate} (clauses longer than 160 characters or with more than 12 comparison atoms are dropped, not truncated); a scope check (clauses referencing out-of-scope identifiers are dropped); \emph{positive soundness} (any clause false on some sampled positive is dropped, with disequalities $v \ne c$ additionally checked against the \emph{full} observed value set of $v$ rather than a subsample); and, when Frama-C is available, Houdini pruning to the greatest inductive subset~\citep{flanagan2001houdini}.
+Positive subsampling always retains per-variable extremes---the witnesses that falsify overfitted boxes.
+Survival results are memoized on the normalized clause set, since ablation re-filters heavily overlapping sets.
+
+\paragraph{Step 2: per-rollout scores.}
+With $n = |\mathcal{N}|$ trace units and $U = \bigcup_{A \in \mathcal{A}} A$ the group union,
+\begin{align}
+\mathrm{base}(A) &= \frac{|\mathrm{rej}(\mathrm{surv}(A))|}{n},
+&
+\mathrm{marg}(A) &= \frac{\bigl|\mathrm{rej}(\mathrm{surv}(U)) \setminus \mathrm{rej}(\mathrm{surv}(U \setminus A))\bigr|}{n},
+\end{align}
+i.e.\ base measures how much of the impossible space the rollout alone excludes, and the marginal term is the rollout's ablation gain over the rest of the group---group-relative credit in the spirit of GRPO~\citep{shao2024deepseekmath}, computed against the verifier-pruned union rather than against raw scores.
+A clause is \emph{useful} if it uniquely rejects at least one unit no other clause of the rollout rejects; with $\mathrm{junk}(A) = 1 - \mathrm{useful}(A)/|A|$, the reward is
+\begin{equation}
+r(A) \;=\; \max\bigl(0,\; w_b \,\mathrm{base}(A) + w_m \,\mathrm{marg}(A) - w_j \,\mathrm{junk}(A)\bigr),
+\qquad (w_b, w_m, w_j) = (0.5,\, 0.5,\, 0.05).
+\label{eq:reward}
 \end{equation}
-\emph{DPO}~\citep{rafailov2023direct} then refines preferences from
-the SFT checkpoint $\pi_{\mathrm{ref}}$:
-\begin{equation}\label{eq:dpo}
-\mathcal{L}_{\mathrm{DPO}} =
-  -\!\sum_{(P,y^+,y^-)}\!
-  \log\sigma\!\Bigl(
-    \beta\bigl[
-      \log\frac{\pi_\theta(y^+\!\mid\! P)}
-               {\pi_{\mathrm{ref}}(y^+\!\mid\! P)}
-      - \log\frac{\pi_\theta(y^-\!\mid\! P)}
-               {\pi_{\mathrm{ref}}(y^-\!\mid\! P)}
-    \bigr]
-  \Bigr).
-\end{equation}
-The pipeline certifies every output regardless of model quality: a
-weaker model yields a smaller $C^*$ but never an uncertified one.
-Stage-stratified DPO weighting and further details are in
-Appendix~\ref{app:dpo}.
+The group additionally receives $\mathrm{batch} = |\mathrm{rej}(\mathrm{surv}(U))| / n$ and a re-roll flag when $\mathrm{batch} < 0.6$.
+
+\paragraph{Step 3: multi-seed minimum.}
+Scores are computed against $s{=}2$ independent example sets plus $h{=}1$ \emph{holdout} set drawn with a fresh seed per reward call, and each rollout's final $\mathrm{base}/\mathrm{marg}/r$ is the \emph{minimum} across sets.
+A true invariant is indifferent to the sampling seed; anything fitted to one concrete sample is not, and the minimum ensures memorizing any single deterministic sample earns nothing.
+
+Negative rejection is evaluated by a locked-down predicate evaluator with C integer semantics (truncation-toward-zero division and remainder, matching the compiled traces), so the reward needs no SMT call on its hot path; the only heavyweight cost is Houdini, bounded by $G{+}1$ pruner runs per group and cut further by memoization and a lite-to-full filter cascade.
+
+%% ============================================================
+\subsection{Anti-Hacking Defenses}
+\label{sec:method:antihack}
+
+Because the reward is computed from a finite sample, ``memorize the sample'' is always an available policy; we enumerate the attack surface and close each vector, treating hack resistance as a specification with its own regression gates ($\S$\ref{sec:experiments}).
+
+\begin{itemize}[leftmargin=1.5em, itemsep=3pt, topsep=2pt]
+\item \textbf{Mega-conjunction} (one gate-compliant clause enumerating the negative pool): blocked by the per-clause complexity gate (160 chars / 12 atoms, drop-not-truncate).
+\item \textbf{Split spray} (hundreds of small $v \ne c$ clauses): blocked by a \emph{rollout atom budget}---only the emission-order prefix within 32 total atoms is scored.
+Honest summaries (3--6 clauses of 1--4 atoms) fit with headroom; a spray sacrifices its budget for clauses the next defense zeroes out.
+\item \textbf{Gold-plus-spray} (ride one true clause, pad with shadows): the junk term of Eq.~\ref{eq:reward} discounts clauses that reject nothing uniquely, so padding strictly lowers reward.
+\item \textbf{Sample-extreme boxes} ($lo \le v \le hi$ read off the observed range): the holdout seed's \emph{far probes} give each seed a different input envelope, so a box fitted to canonical extremes is falsified by holdout positives (dropped in survival) or misses holdout negatives; a symbolic bound ($x \le n$) is envelope-indifferent.
+\item \textbf{Pointwise memorization} ($v \ne c$ farms aimed at negative clusters): \emph{tier jitter} (seed-hashed $\pm2$ on non-edge tiers, uniform within a run so coupled preconditions stay satisfiable) decorrelates sampled values across seeds, and bound-negative offsets are themselves seed-hashed; the cross-seed minimum then zeroes the farm.
+\item \textbf{Slice concentration} (many negatives sharing one farm-targetable coordinate): a slice cap ($\le 6$ units per never-seen-positive coordinate value) bounds what any 32-atom farm can reach.
+\item \textbf{Dimension starvation} (score $\approx 1$ on relations while ignoring bounds): relation units are capped at twice the bound units, so bounds carry a program-independent share of the reward.
+\end{itemize}
+
+The defenses compose: capacity limits make memorization expensive, uniqueness accounting makes it unpaid, and cross-seed minimum scoring makes it worthless even if afforded.
+$\S$\ref{sec:experiments} validates the composition adversarially.
+
+%% ============================================================
+\subsection{Inference: Closed-Book Generation with Certified Repair}
+\label{sec:method:inference}
+
+At inference time the policy is prompted with the program \emph{after postcondition stripping} (closed-book): the prompt asks for the strongest inductive ACSL loop invariants capturing the loop's behavior---conservation and relational laws plus tight progress bounds---emitted only as \texttt{loop invariant} lines.
+The system prompt encodes the Frama-C/WP practicalities: one core relational equality, minimal bounds, exact \texttt{loop assigns}, no tautologies, non-strict weakening of strict guards at exit, and pre-state references via \texttt{\textbackslash at(v,Pre)} for parameters only.
+
+For each program the framework samples $n$ rollouts (cloud API or in-process batched vLLM), unions and deduplicates their clauses, and applies the same survival cascade as the reward---ending, here, in full Houdini pruning and Frama-C/WP verification of the re-annotated program.
+Repair is thus Houdini-style subtraction rather than conversational self-correction: unsound clauses are dropped by the pruner, not re-prompted.
+If verification fails, the framework re-rolls up to a bounded number of attempts, keeping the best result by (verified, summary size).
+Training and inference share one canonical sampler configuration, so the reward optimized during RL is exactly the quantity the deployed pipeline measures.

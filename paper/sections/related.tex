@@ -2,101 +2,33 @@
 \section{Related Work}\label{sec:related}
 %% ============================================================
 
-\paragraph{Classical Invariant Generation.}
-Abstract interpretation~\citep{cousot1977abstract} computes fixed-point
-over-approximations in abstract domains but is restricted to the
-chosen domain's expressiveness.
-Template-based constraint
-solving~\citep{colon2003linear,sankaranarayanan2004non} searches for
-coefficients via LP/SDP, complete within the template family but
-blind outside it.
-The Houdini algorithm~\citep{flanagan2001houdini} iteratively removes
-non-inductive conjuncts from a candidate set; we adopt it as
-Stage~$F_4$ of our filter pipeline.
-Daikon~\citep{daikon} and DIG~\citep{nguyen2012using} mine likely
-invariants from traces but require a separate verifier pass.
-ICE learning~\citep{garg2016learning} uses implication counterexamples
-to guide decision-tree learners, achieving completeness within its
-feature space.
-All these methods are confined to their pre-designed search spaces.
+\paragraph{Classical invariant generation.}
+Static approaches compute invariants as fixpoints in abstract domains: Karr's affine-relation analysis~\citep{karr1976affine}, abstract interpretation~\citep{cousot1977abstract}, and the polyhedral domain~\citep{cousot1978automatic} discover invariants of a fixed shape without any target, but are limited to the chosen domain's expressiveness and lose precision under widening.
+Constraint- and template-based methods fix a syntactic template and solve for coefficients---linear invariants via Farkas-style non-linear constraint solving~\citep{colon2003linear}, non-linear invariants via Gr\"obner bases~\citep{sankaranarayanan2004non}, and program analysis recast as constraint solving~\citep{gulwani2008program,gupta2009invgen}.
+In verification-condition frameworks, invariants are by-products of proving a property: predicate abstraction~\citep{graf1997predicate,ball2002slam}, Craig interpolation~\citep{mcmillan2003interpolation}, IC3/PDR~\citep{bradley2011sat,komuravelli2014smt,gurfinkel2015seahorn}, and abduction~\citep{dillig2013inductive} all generalize from the \emph{negation of the target}; without a property to refute, these engines have nothing to generalize from.
+Houdini~\citep{flanagan2001houdini} computes the greatest inductive subset of a candidate pool; \sam{} reuses exactly this algorithm as its soundness backstop, but delegates \emph{candidate generation}---the part Houdini leaves to heuristic annotation guessing---to a learned policy.
+Furia and Meyer generate invariant candidates by syntactically mutating the postcondition~\citep{furia2010inferring}, the clearest evidence for our motivating observation that in practice the target and the invariant are two projections of the same object.
 
-\paragraph{LLM-Based Invariant Generation.}
-Chakraborty and Lahiri~\citep{chakraborty2024towards} show GPT-4 can
-generate invariants with a verification feedback loop.
-Pei et al.~\citep{pei2023can} find iterative refinement essential for
-Hoare-style annotations.
-Kamath et al.~\citep{kamath2023finding} combine LLM generation with
-bounded model checking.
-Endres et al.~\citep{endres2024can} study whether LLMs can write
-formal specifications in general, finding success on simpler
-templates but frequent failures on complex loop invariants.
-LLMs also suggest proof tactics~\citep{han2021proof,jiang2022draft} and
-produce formal
-proofs~\citep{wu2022autoformalization,lample2022hypertree,polu2022formal}.
-A common thread is heavy reliance on external tool chains and the
-strongest closed-source models, without exploring locally deployed
-small models.
+\paragraph{Data-driven and learning-based invariant inference.}
+Daikon pioneered inferring \emph{likely} invariants from execution traces without any specification~\citep{daikon}; DIG extended this to polynomial and array invariants~\citep{nguyen2012using}, later with symbolic-state checking~\citep{nla2019,nguyen2017syminfer}.
+These works share our target-free spirit but stop at ``likely'': candidates are unsound until confirmed, and confirmation is left to a downstream prover.
+Guess-and-check frameworks close that loop: invariant inference as classification over reachable/unreachable states~\citep{sharma2012interpolants,sharma2013data}, ICE learning with implication counterexamples~\citep{garg2014ice}, its decision-tree instantiation~\citep{garg2016learning}, Horn-ICE for contracts~\citep{ezudheen2018horn}, data-driven CHC solving~\citep{zhu2018data}, and PIE's on-demand feature learning~\citep{padhi2016pie}.
+Crucially, in all of these the \emph{negative} and \emph{implication} examples are produced by a verifier attempting a given property: the teacher is target-directed even when the learner is agnostic.
+\sam{} keeps the classification view---an invariant is scored by how it separates reachable from unreachable states---but manufactures negatives \emph{from the loop's own dynamics} (impossible continuations and off-manifold perturbations of real traces), so the signal exists before any property is stated.
 
-\paragraph{Learning-Based Loop Invariant Synthesis.}
-Si et al.~\citep{si2018learning} frame invariant generation as a
-supervised learning task, training a graph neural network on
-programs from the SyGuS competition and using counterexample-guided
-refinement.
-Code2Inv~\citep{si2020code2inv} extends this with a continuous
-representation of programs and invariants, using reinforcement
-learning with the Z3 verifier as the reward signal.
-CLN2INV~\citep{ryan2020cln2inv} learns continuous logic networks
-that map program variables to invariant satisfaction scores,
-achieving competitive performance on polynomial invariants.
-These approaches pioneered neural invariant synthesis but are
-constrained to fixed template families (e.g., octagonal or
-polynomial) and do not leverage the flexible generation
-capabilities of pretrained language models.
+\paragraph{Neural and LLM-based invariant generation.}
+Code2Inv learns a policy over invariant syntax trees with reinforcement from solver feedback~\citep{si2018learning,si2020code2inv}; CLN2INV and G-CLN learn invariant coefficients from traces with differentiable logic~\citep{ryan2020cln2inv,yao2020gcln}.
+With LLMs, \citet{pei2023can} fine-tune to predict Daikon-style invariants at scale; Loopy prompts GPT-4 for ACSL invariants repaired by Houdini~\citep{kamath2023finding}; iRank re-ranks LLM candidates~\citep{chakraborty2023ranking}; Lemur interleaves LLM proposals with automated reasoners~\citep{wu2024lemur}; AutoSpec and SpecGen synthesize full specifications with static-analysis guidance~\citep{wen2024enchanting,ma2024specgen}; benchmarks now probe memory-manipulating programs~\citep{liu2024towards} and proof-oriented languages~\citep{chakraborty2024towards,first2023baldur,misu2024towards}.
+Almost without exception these systems receive the assertion in the prompt and are judged---and, where trained, rewarded---by whether the target verifies.
+This yields exactly the failure mode we target: sparse, binary, hackable feedback~\citep{skalse2022defining,gao2023scaling} that favors restating $Q$ over understanding the loop.
+\sam{} differs on both axes: the generator is \emph{closed-book} (the postcondition is stripped from its input), and the reward is a dense, execution-grounded measure of summary tightness rather than a verifier bit.
 
-\paragraph{Mathematical Reasoning Distillation.}
-Knowledge distillation for mathematical reasoning has attracted
-significant attention.
-The DeepSeek-R1 distilled models~\citep{deepseekr1} demonstrate that
-distillation transfers reasoning trajectories to small models more
-effectively than RL, which requires the student to rediscover them
-through sparse rewards.
-Mukherjee et al.~\citep{mukherjee2023orca} show that step-by-step
-explanations from GPT-4 substantially improve small model reasoning
-via imitation learning.
-WizardMath~\citep{luo2023wizardmath} applies RLHF with process
-supervision to enhance mathematical reasoning in open models.
-Yuan et al.~\citep{yuan2023scaling} demonstrate that rejection
-sampling from large models, combined with SFT on verified solutions,
-offers a scalable alternative to RL for math.
-MAmmoTH~\citep{yue2024mammoth} constructs instruction-tuning data
-by combining CoT and program-of-thought rationales from GPT-4,
-achieving strong math reasoning in 7B--70B models.
-Our approach inherits the RLVR spirit but moves exploration entirely
-offline, using formal verifier feedback to construct ground-truth
-preference pairs for SFT\,+\,DPO distillation specifically for
-the program verification domain.
+\paragraph{Loop summarization.}
+Summarizing loop effects independently of any property has a long history in static analysis: abstract-transformer summaries~\citep{kroening2008loop}, partial summaries in dynamic test generation~\citep{godefroid2011automatic}, disjunctive summaries via path dependency~\citep{xie2016proteus}, compositional recurrence analysis~\citep{farzan2015compositional,kincaid2017compositional}, and acceleration~\citep{bardin2008fast}.
+These techniques are precise on the loop classes their theories cover but brittle outside them.
+We adopt the task framing---characterize the loop, not the goal---but express summaries as ACSL inductive invariants checked by Frama-C/WP~\citep{framac,acsl}, and use learning to cover loop shapes (nondeterministic guards, branch-dependent updates, non-linear laws) that closed-form summarization does not.
 
-\paragraph{Distillation vs.\ RL for Code and Reasoning.}
-RLHF~\citep{ouyang2022training} and DPO~\citep{rafailov2023direct}
-are standard LLM alignment techniques.
-RLVR replaces human preferences with automated oracle rewards,
-yielding large gains in math reasoning
-(DeepSeek-R1~\citep{deepseekr1}, Tulu~3~\citep{lambert2024tulu}).
-CodeRL~\citep{le2022coderl} and RLEF~\citep{gehring2024rlef}
-apply RL with execution feedback for code generation.
-However, binary verifier rewards are particularly sparse for
-loop invariant generation: a single missing conjunct invalidates
-the entire annotation.
-This sparsity, combined with the reward-hackability of trivially
-weak invariants, motivates our offline distillation approach over
-online RL.
-
-\paragraph{Training Data Synthesis.}
-Existing benchmarks (NLA suite~\citep{svcomp},
-linear set~\citep{si2018learning}) contain only dozens of hand-crafted
-programs.
-Grammar-based fuzzing~\citep{godefroid2008grammar} and probabilistic
-synthesis~\citep{nori2015efficient} generate programs at scale but
-lack semantic constraints.
-\lf{} addresses this gap with semantic core templates
-that guarantee well-defined invariant structure at tunable complexity.
+\paragraph{RL from verifiable rewards and reward hacking.}
+Post-training LLMs against programmatically checkable signals---unit tests for code~\citep{le2022coderl,gehring2024rlef,chen2021evaluating}, final answers for mathematics~\citep{shao2024deepseekmath,lambert2024tulu,deepseekr1}, or process supervision~\citep{lightman2023lets}---has proven far more robust than learned preference models~\citep{ouyang2022training,rafailov2023direct}, yet even verifiable rewards are gamed when the checker under-specifies the intent~\citep{amodei2016concrete,skalse2022defining,gao2023scaling}.
+Our setting sharpens this problem: the reward is computed from a \emph{finite sample} of program behavior, so memorizing the sample is always a candidate policy.
+The layered defenses of $\S$\ref{sec:method:antihack}---capacity limits on the policy's output, uniqueness-based credit, and minimum-scoring across decorrelated held-out samples---are, to our knowledge, the first systematic anti-hacking treatment for an execution-based formal-methods reward, and we validate them with adversarial gates rather than by assumption.

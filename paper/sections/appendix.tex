@@ -2,539 +2,71 @@
 %% Appendix (included after \appendix in main.tex)
 %% ============================================================
 
-%% ============================================================
-\section{\lf{}: Full DSL Description}
-\label{app:loop-factory}
-%% ============================================================
+\section{Sampler and Reward Constants}
+\label{app:constants}
 
-\subsection{DSL Grammar}
+Table~\ref{tab:constants} lists the canonical configuration shared by training (reward service) and inference, so that the reward optimized during RL is exactly the quantity measured at deployment.
 
-A \lf{} program consists of an initialisation block
-followed by one or more loops:
-\[
-\textbf{Prog} \;::=\; \textbf{Init} \;;\; \textbf{Loop}^+
-\qquad
-\textbf{Loop} \;::=\; \texttt{while}\;(g)\;\{\;\textbf{Body}\;\}
-\]
-\[
-\textbf{Body} \;::=\;
-  \bigl(\;v := e
-  \;\mid\; \texttt{if}\;(g)\;\{S\}\;[\texttt{else}\;\{S\}]
-  \;\mid\; \textbf{Loop}\;\bigr)^*
-\]
-Variables $\mathcal{V}$ are partitioned into immutable
-\emph{parameters} $\mathcal{P}$ and writable \emph{state variables}
-$\mathcal{L}$.
-Body expressions have the form $v \;\texttt{op}\; x$ with
-$\texttt{op} \in \{+,-,\times,\bmod\}$ ($/$~additionally permitted
-for nonlinear programs); the guard $g$ is a linear comparison or
-the constant \texttt{1} (for \texttt{while(1)} with \texttt{break}).
-\textbf{Init} assigns every variable in $\mathcal{L}$ exactly once
-from expressions over $\mathcal{P}$.
-
-\subsection{Multi-Loop and Nesting}
-
-The grammar supports \emph{sequential} multi-loop programs
-($\textbf{Loop}^+$), where later loops share state computed by
-earlier ones, and \emph{nested} loops (a \textbf{Loop} inside
-\textbf{Body}), bounded by a maximum depth $D_{\max}$.
-Each loop is generated independently with its own counter and guard,
-drawing state variables from the shared pool within budget $m$.
-
-\subsection{Complexity-Controlling Fuel Parameters}
-
-Structural complexity is governed by fuel parameters
-(Table~\ref{tab:fuel-app}), each sampled uniformly from a
-configurable $[\mathit{min}, \mathit{max}]$ range.
-
-\begin{table}[htb]
-\caption{Fuel parameters controlling per-program complexity.}
-\label{tab:fuel-app}
+\begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}lll@{}}
+\begin{tabular}{llp{6.2cm}}
 \toprule
-\textbf{Parameter} & \textbf{Controls} & \textbf{Default range} \\
+\textbf{Constant} & \textbf{Value} & \textbf{Role} \\
 \midrule
-$m$              & Total state variables          & $\le 6$ \\
-$[p_{\min},p_{\max}]$ & Immutable parameters      & $[1,2]$ \\
-$[n_{\min},n_{\max}]$ & Sequential loops           & $[1,1]$ \\
-$[k_{\min},k_{\max}]$ & Assignments per loop body  & $[1,6]$ \\
-$[f_{\min},f_{\max}]$ & Conditional blocks per loop & $[0,3]$ \\
-$D_{\max}$       & Maximum nesting depth          & $1$     \\
+runs per seed & 12 & concrete executions per example set \\
+input tiers & 20 tiers, clamped to $[-64, 64]$ & deterministic magnitude schedule (edges first) \\
+far probes & 3 per seed, magnitude $\le 512$ & seed-hashed envelope decorrelation; cube-safe \\
+tier jitter & $\pm 2$ on non-edge tiers & seed-hashed value decorrelation \\
+relation deltas & $\pm\{1,2,3\}$ & small perturbations off dense bases \\
+dense window & 4 & successors required for a base to be ``dense'' \\
+escape ladder & $\pm\{5,8,13,21,34,55,89\}$ & box-escape bound negatives \\
+over-run steps & 24 & post-exit continuation length (one trace unit per run) \\
+iteration cap & $2 \times 10^6$ & divergence safety net (capped runs flagged) \\
+slice cap & 6 & max units per farm-targetable coordinate value \\
+relation:bound & $\le 2:1$ & dimension balancing \\
+\midrule
+complexity gate & 160 chars / 12 atoms & per-clause capacity limit (drop, not truncate) \\
+rollout atom budget & 32 & total atoms scored per rollout (prefix) \\
+$(w_b, w_m, w_j)$ & $(0.5, 0.5, 0.05)$ & base / marginal / junk weights (Eq.~\ref{eq:reward}) \\
+seeds / holdout & 2 / 1 & minimum-combined example sets \\
+re-roll threshold & 0.6 & group batch score below which re-rolling is advised \\
+positive subsample & 4096 & per-set cap; per-variable extremes always retained \\
+\midrule
+Houdini iterations & $\le 500$, patience 2 & greatest-inductive-subset pruning \\
+WP configuration & Z3, 30\,s, Typed model & per-goal prover budget \\
 \bottomrule
 \end{tabular}
+\caption{Canonical constants of the sampler ($\S$\ref{sec:method:sampler}), reward ($\S$\ref{sec:method:reward}--$\S$\ref{sec:method:antihack}), and verification backend.}
+\label{tab:constants}
 \end{table}
 
-\subsection{Semantic Injection}
+\section{Generation Prompt}
+\label{app:prompt}
 
-Purely random loop bodies rarely exhibit the algebraic structure
-found in real verification benchmarks.
-\lf{} addresses this through \emph{semantic injection}: with
-probability $\pi_{\mathrm{core}}$ (default $0.88$), the generator
-seeds each loop with a \emph{semantic core}---a template that
-fixes a counter--guard pair (guaranteeing termination), one or more
-core variable updates maintaining a known invariant, and matching
-initialisations.
-Core variables are \emph{write-protected} during the subsequent
-extension phase, which fills remaining budgets with freely sampled
-expressions over non-core variables, ensuring the injected invariant
-is preserved regardless of surrounding code.
-The remaining $1{-}\pi_{\mathrm{core}}$ of loops are assembled
-freely.
-In addition, we optionally replace the default instantiation step
-with a constrained LLM generation step that proposes guards and
-updates according to specific semantic requirements. Invalid outputs
-are rejected, and the generator falls back to the original rule.
+The closed-book generation prompt (abridged); the postcondition is stripped from the program before it is shown.
 
-The cores span eight semantic families
-(Table~\ref{tab:sem-families}).
-
-\begin{table}[htb]
-\caption{Semantic families of core templates.}
-\label{tab:sem-families}
-\centering
-\small
-\begin{tabular}{@{}ll@{}}
-\toprule
-\textbf{Family} & \textbf{Representative invariant} \\
-\midrule
-Linear conservation     & $a + b = N$ \\
-Monotone accumulation   & $s = \sum_{j=0}^{k-1} f(j)$ \\
-Proportional stride     & $j = c \cdot i$ \\
-Modular counting        & $c \equiv t \pmod{T}$ \\
-State-machine transition & $\mathit{state} \in \{s_1, \ldots, s_k\}$ \\
-Division / GCD          & $a = q \cdot d + r$ \\
-Multiplicative redistribution & $z + xy = a_0 b_0$ \\
-Polynomial recurrence   & $zw \ge p^2$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Corpus}
-
-Using \lf{} we synthesise 2{,}000 programs spanning
-all eight families: 1{,}900 for training and 100 held out as a
-synthetic test set.
-
-%% ============================================================
-\section{Detailed Per-Loop Algorithm}
-\label{app:algorithm}
-%% ============================================================
-
-\subsection{Data Structures}
-
-For each loop index $i$ the pipeline maintains:
-$\mathbf{record}_i$ (loop guard, assignments, initial values,
-invariable parameters);
-$\mathcal{T}_i$ (execution trace set);
-$C_i$ (live candidate pool);
-$C^*_i$ (certified output).
-
-\subsection{Houdini Pruning}
-
-\begin{algorithm}[htb]
-\caption{Houdini Pruning (Stage~$F_4$)}\label{alg:houdini}
-\rule{\linewidth}{0.4pt}
-\begin{algorithmic}
-\alginput{Candidate set $C$, verifier $\mathcal{V}$}
-\algoutput{Maximal inductive subset $C^* \subseteq C$}
-\algblank
-\algline $C^* \leftarrow C$\\
-\algline \kw{repeat}\\
-\algline \algind $R \leftarrow \{c \in C^* \mid \mathcal{V}(c) = \mathit{fail}\}$\\
-\algline \algind $C^* \leftarrow C^* \setminus R$\\
-\algline \kw{until} $R = \emptyset$ \kw{or} $C^* = \emptyset$\\
-\algline \kw{return} $C^*$
-\end{algorithmic}
-\rule{\linewidth}{0.4pt}
-\end{algorithm}
-
-\subsection{Complete Per-Loop Algorithm}
-
-\begin{algorithm}[htb]
-\caption{InvariantGenerator per loop $i$}\label{alg:full}
-\rule{\linewidth}{0.4pt}
-\begin{algorithmic}
-\alginput{$P$, record $\mathbf{r}$, traces $\mathcal{T}$, LLM $\mathcal{M}$, verifier $\mathcal{V}$}
-\algoutput{Annotated code $P^*$ or $\bot$}
-\algblank
-\algline \textit{Phase I --- Generation:}\\
-\algline $P_{\text{tmpl}} \leftarrow \texttt{InsertTemplate}(P, i)$\\
-\algline $(\sigma, \ell) \leftarrow \texttt{PreparePrompt}(\mathbf{r}, \mathcal{T})$\\
-\algline \kw{for} $j = 1,\ldots,N$ \kw{in parallel do}\\
-\algline \algind $(\rho_j, I_j) \leftarrow \mathcal{M}(P_{\text{tmpl}}, \sigma, \ell, t_j)$\\
-\algline $C_{\mathrm{pool}} \leftarrow \bigcup_j \mathrm{conjuncts}(I_j) \;/\;{\sim_{\mathrm{ws}}}$\\
-\algblank
-\algline \textit{Phase II --- Multi-Stage Filtering:}\\
-\algline $C_1 \leftarrow \{c \in C_{\mathrm{pool}} \mid \mathrm{SynValid}(c)\}$ \cmnt{$F_1$}\\
-\algline $C_2 \leftarrow \{c \in C_1 \mid \forall\sigma\in\mathcal{T}:\,\sigma \models c\}$ \cmnt{$F_2$}\\
-\algline $C_3 \leftarrow \mathrm{SemDedup}(C_2)$ \cmnt{$F_3$}\\
-\algline $C_4 \leftarrow \texttt{Houdini}(C_3, \mathcal{V})$ \cmnt{$F_4$}\\
-\algline $C^* \leftarrow \mathrm{TrivFilter}(C_4)$ \cmnt{$F_5$}\\
-\algline \kw{if} $C^* = \emptyset$ \kw{then return} $\bot$\\
-\algblank
-\algline \textit{Phase III --- Verification \& Repair:}\\
-\algline \kw{if} $\mathcal{V}$ confirms postcondition \kw{then}\\
-\algline \algind \kw{return} $\texttt{Annotate}(P, C^*)$\\
-\algline \kw{else} run $\le K$ repair iterations\\
-\algline \kw{return} $\texttt{Annotate}(P, C^*)$ or $\bot$
-\end{algorithmic}
-\rule{\linewidth}{0.4pt}
-\end{algorithm}
-
-\subsection{Role of Static Analysis}
-
-Before Phase~I, \texttt{LoopAnalysis} performs a lightweight static
-pre-pass to populate $\mathbf{record}_i$: loop guard extraction,
-unchanged-variable identification (for \lstinline|\at| invariants),
-conservative integer bound inference, and record assembly.
-Frama-C/WP is invoked \emph{only} during Houdini pruning ($F_4$).
-
-\subsection{Non-Attributability of the Certified Output}
-\label{app:nonattrib}
-
-\begin{definition}[Attribution]
-$C^*$ is \emph{attributable to call $j$} if $C^* \subseteq C_j$.
-\end{definition}
-
-\begin{proposition}[Non-attributability]\label{prop:nonattrib}
-If the correct annotation requires $m \ge 2$ conjuncts, each
-discovered independently with probability $q$ per call, then
-single-call coverage is $q^m$ while union coverage is
-$1 - (1{-}q)^{mN}$.
-For $q{=}0.6$, $m{=}4$, $N{=}5$: single $\approx 0.13$;
-union $\approx 1.00$.
-\end{proposition}
-
-Any per-call binary scoring (including GRPO) systematically
-mislabels calls contributing essential conjuncts to the union.
-
-%% ============================================================
-\section{DPO Data Construction}
-\label{app:dpo}
-%% ============================================================
-
-\subsection{Chosen and Rejected Responses}
-
-The chosen annotated program is
-$P^+ = \texttt{Annotate}(P, i, C^*)$.
-For each rejected conjunct $r \in C_{\mathrm{pool}} \setminus C^*$:
-$P^-_r = \texttt{Annotate}(P, i, \{r\})$,
-labelled by rejection stage $k(r) \in \{1,\dots,5\}$.
-The full DPO record is
-$\mathcal{D}(P, i, r) = (P,\; P^+,\; P^-_r,\; k(r))$.
-
-\subsection{Off-Policy Augmentation}
-\label{app:dpo-aug}
-
-The pipeline applies two complementary off-policy augmentation
-strategies to enrich the DPO training signal.
-Both operate purely on the artefacts already produced by the
-filtering pipeline, requiring no additional LLM or verifier calls.
-
-\paragraph{Negative pool collection.}
-During filtering, every conjunct eliminated at \emph{any} stage is
-added to a per-program negative pool~$B$:
-\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{Syntax gate} ($F_1$): conjuncts violating ACSL syntax
-  rules or containing forbidden operators (\texttt{\^{}},
-  \texttt{\textbackslash pow}).
-\item \textbf{Trace gate} ($F_2$): conjuncts passing syntax but
-  falsified by at least one execution trace.
-\item \textbf{Houdini gate} ($F_4$): conjuncts removed during
-  iterative formal pruning (present before Houdini but absent after).
-\end{itemize}
-Conjuncts already in the chosen set~$C^*$ are excluded from~$B$
-(by normalised text comparison).
-
-\paragraph{Augmentation algorithm.}
-Algorithm~\ref{alg:aug-mixed} combines both strategies into a
-unified procedure.
-Let $m = |C^*|$ and $n = |B|$.
-
-\begin{algorithm}[htb]
-\caption{Off-policy DPO augmentation}\label{alg:aug-mixed}
-\rule{\linewidth}{0.4pt}
-\begin{algorithmic}
-\alginput{Chosen code $P^+$ with $m$ conjuncts $C^*$,
-  negative pool $B$ ($n{=}|B|$),
-  rejected candidates $\{R_j\}$ from filtering}
-\algoutput{Set of rejected variants $\{P^-_i\}$}
-\algblank
-\algline \textit{Strategy 1 --- Conjunct recombination:}\\
-\algline \kw{repeat} until enough samples collected:\\
-\algline \algind Sample $g \sim \mathrm{Uniform}(0,\;\max(m{-}2,\,0))$
-  \cmnt{good count}\\
-\algline \algind Sample $b \sim \mathrm{Uniform}(0,\;n)$
-  \cmnt{bad count}\\
-\algline \algind Sample $k_{\max} \sim \mathrm{Uniform}(\max(m{-}2,\,1),\;m{+}2)$
-  \cmnt{total cap}\\
-\algline \algind \kw{if} $g + b < 1$ \kw{or} $g + b > k_{\max}$
-  \kw{then} reject and resample\\
-\algline \algind Draw $g$ conjuncts uniformly from $C^*$
-  $\;\to G_{\mathrm{sub}}$\\
-\algline \algind Draw $b$ conjuncts uniformly from $B$
-  $\;\to B_{\mathrm{sub}}$\\
-\algline \algind $P^- \leftarrow \texttt{Annotate}(P,\;
-  G_{\mathrm{sub}} \cup B_{\mathrm{sub}})$\\
-\algline \algind \kw{if} $P^- \ne P^+$ \kw{then} emit $P^-$\\
-\algblank
-\algline \textit{Strategy 2 --- Error-candidate subset:}\\
-\algline \kw{for each} rejected candidate $R_j$ \kw{do}\\
-\algline \algind Let $\ell = |\mathrm{conjuncts}(R_j)|$\\
-\algline \algind Sample $k \sim \mathrm{Uniform}(1,\;\max(\ell{-}2,\,1))$\\
-\algline \algind Draw $k$ conjuncts uniformly from $R_j$
-  $\;\to S$\\
-\algline \algind $P^- \leftarrow \texttt{Annotate}(P,\; S)$\\
-\algline \algind \kw{if} $\mathrm{conjuncts}(P^-) \ne C^*$
-  \kw{then} emit $P^-$
-\end{algorithmic}
-\rule{\linewidth}{0.4pt}
-\end{algorithm}
-
-Key properties:
-\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{Strategy~1} (conjunct recombination):
-  since $g \le m{-}2$, the good subset alone is always a
-  strict subset of~$C^*$, so the variant cannot equal the chosen
-  annotation even when $b = 0$.
-  The randomised cap $k_{\max}$ keeps the total annotation
-  size close to~$m$, preventing degenerate extremes.
-\item \textbf{Strategy~2} (error-candidate subset):
-  each rejected candidate $R_j$ is a full annotated program that
-  failed at some filtering stage.
-  A random proper subset of its conjuncts produces a new
-  rejected variant, with a normalised check ensuring the conjunct
-  set differs from~$C^*$.
-\item Both strategies are zero-cost: they recombine existing
-  artefacts without additional model inference or formal
-  verification.
-\end{itemize}
-
-\subsection{Stage-Stratified Loss}
-
-We extend DPO with stage-dependent weights $w_k$:
-\[
-\mathcal{L}_{\text{S-DPO}} =
-  -\mathbb{E}\!\left[w_{k(r)} \cdot \log \sigma\!\left(
-    \beta \log \frac{\pi_\theta(P^+ \mid P)}
-                    {\pi_{\text{ref}}(P^+ \mid P)}
-    - \beta \log \frac{\pi_\theta(P^-_r \mid P)}
-                      {\pi_{\text{ref}}(P^-_r \mid P)}
-  \right)\right]
-\]
-with default weights $w_1{=}0.5$, $w_2{=}1.0$, $w_3{=}1.5$,
-$w_4{=}2.0$, $w_5{=}2.5$, reflecting that later-stage rejections
-are harder and more informative contrasts.
-
-%% ============================================================
-\section{Prompts}
-\label{app:prompts}
-%% ============================================================
-
-\subsection{System Prompt}
-
-\begin{promptbox}[System Prompt]
+\begin{promptbox}[System prompt (abridged)]
 \begin{lstlisting}[style=promptstyle]
-You are a formal verification expert specializing in loop
-invariant synthesis for Frama-C with the WP plugin.
-
-## TASK
-Given a C function with a loop and a postcondition
-(/*@ assert ... */), generate ACSL loop annotations
-(invariants, assigns) that enable Frama-C/WP to verify
-the assertion.
-
-## CORE STRATEGY: Assertion-Driven Invariant Synthesis
-1. Decompose the assertion: each conjunct of the assert
-   (split on &&) is a candidate loop invariant.
-2. Add boundary invariants: weaken the loop guard.
-   - while(i < n) needs: i <= n
-   - while(n <= a) needs: n <= a+1
-3. Preserve parameter values: if a parameter is unmodified,
-   assert: loop invariant x == \at(x, Pre);
-4. Verify sufficiency: check that (invariants AND NOT guard)
-   implies the postcondition.
-
-## FORBIDDEN CONSTRUCTS
-- \forall, \exists  (quantifiers not supported)
-- predicate, logic, axiomatic, lemma
-- Ternary ? :
-- \at(local_var, Pre)  (\at only on function parameters)
-- ^ for exponentiation  (write x*x*x for x cubed)
-
-## ALLOWED OPERATORS
-Comparison: ==, !=, <, <=, >, >=
-Logical:    &&, ||, !, ==>, <==>
-Arithmetic: +, -, *, /, %
-
-## OUTPUT
-Return ONLY the annotated C function. Do not include
-explanations.
+You are given a C function containing a loop. Produce the strongest
+inductive ACSL loop invariants that capture the loop's behavior:
+- one core conservation / relational equality when one exists;
+- minimal tight progress bounds (weaken strict guards to non-strict
+  at exit);
+- an exact loop assigns clause;
+- no tautologies, no restatement of the guard alone;
+- reference initial parameter values only via \at(v, Pre);
+- allowed operators: == != < <= > >= && || ! ==> <==> + - * / %.
+Output ONLY lines of the form:
+  loop invariant <expr>;
 \end{lstlisting}
 \end{promptbox}
 
-\subsection{Loop Context Structure}
+\section{Reward Service Interface}
+\label{app:service}
 
-The user prompt assembles four components into a structured loop
-context block.
-Table~\ref{tab:loop-context-fields} summarises each field and its
-source.
-
-\begin{table}[htb]
-\caption{Fields of the loop context prompt and their construction.}
-\label{tab:loop-context-fields}
-\centering
-\small
-\begin{tabular}{@{}lll@{}}
-\toprule
-\textbf{Field} & \textbf{Content} & \textbf{Source} \\
-\midrule
-Pre-Condition        & ACSL state at loop entry   & Symbolic execution \\
-Transition Relation  & One-step $v \mapsto e'$    & Symbolic execution \\
-Loop Snippet         & Raw C code of loop body    & Static analysis \\
-Execution Traces     & Temporally labelled states & Dynamic sampling \\
-Variable List        & $V_{\mathrm{mod}} \cup \mathcal{P}$ & Static analysis \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The overall prompt layout is shown below:
-
-\begin{promptbox}[Loop Context Layout]
-\begin{lstlisting}[style=promptstyle]
-### Loop Context: ###
-1. Loop Context
-  A. Pre-Condition: <ACSL state expression>
-  B. Loop Transition Relation: <one-step summary>
-  C. Loop Snippet:
-     ```c
-     <loop code>
-     ```
-
-2. Execution Traces
-  [TRACE 1]
-    [state] (BEFORE loop starts) ->
-    [state] (BEFORE iteration 1 body executes) ->
-    [state] (AFTER loop terminates)
-  ...
-
-### AVAILABLE VARIABLES AND PARAMETERS
-**Available Variables:** v1, v2, ...
-**Function Parameters:**
-  - p1 (or \at(p1, Pre) for initial value)
-\end{lstlisting}
-\end{promptbox}
-
-\subsection{User Prompt}
-
-The user prompt contains two parts: a loop context block and
-execution traces with temporal labels.
-
-\begin{promptbox}[User Prompt Template]
-\begin{lstlisting}[style=promptstyle]
-### Loop Context: ###
-1. Loop Context
-  A. Pre-Condition: `<precondition>`
-  B. Loop Transition Relation: `<transition_expr>`
-  C. Loop Snippet:
-```c
-<loop_code>
-```
-2. Execution Traces
-   WARNING: CRITICAL TEMPORAL SEMANTICS:
-   - Each state is labeled as
-     'BEFORE loop body execution'
-     or 'AFTER loop terminates'
-   - Loop invariants must hold at the START of each
-     iteration (BEFORE body executes)
-\end{lstlisting}
-\end{promptbox}
-
-\begin{promptbox}[Trace Example]
-\begin{lstlisting}[style=promptstyle]
-[TRACE 1]
-    [ n==0 && x==0 && y==1 && z==6 ]
-        (BEFORE loop starts) ->
-    [ n==1 && x==1 && y==7 && z==12 ]
-        (BEFORE iteration 1 body executes) ->
-    [ n==2 && x==8 && y==25 && z==18 ]
-        (AFTER loop terminates)
-\end{lstlisting}
-\end{promptbox}
-
-Temperature diversity: the primary call uses $t_1{=}1.0$; subsequent
-calls draw uniformly from $\{0.8, 1.0, 1.1, 1.2\}$.
-
-%% ============================================================
-\section{ACSL Syntax Gate Rules}
-\label{app:syntax-gate}
-%% ============================================================
-
-Each conjunct is checked against these ordered rules (any failure
-causes rejection):
-
-\begin{enumerate}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{Trivial/placeholder tokens:}
-  \texttt{true}, \texttt{false}, \texttt{...}, punctuation-only.
-\item \textbf{Non-ASCII characters:}
-  Unicode inequality signs, control characters.
-\item \textbf{Nested \texttt{loop invariant} keyword:}
-  LLM emits full annotation line instead of bare expression.
-\item \textbf{Bracket balance:}
-  Unmatched parentheses, brackets, or braces.
-\item \textbf{Forbidden quantifiers:}
-  \texttt{\textbackslash forall}, \texttt{\textbackslash exists}.
-\item \textbf{Forbidden ACSL definitions:}
-  \texttt{predicate}, \texttt{inductive}, \texttt{logic},
-  \texttt{axiomatic}, \texttt{lemma}.
-\item \textbf{Forbidden math operators:}
-  \texttt{\textbackslash product}, \texttt{\textbackslash sum},
-  \texttt{\textbackslash min}, \texttt{\textbackslash max}.
-\item \textbf{Ternary operator:}
-  \texttt{?\ :} is not valid ACSL.
-\item \textbf{Undefined variable names:}
-  Checked against known variables from $\mathbf{record}$.
-\item \textbf{\texttt{\textbackslash at} scope:}
-  Only permitted on function parameters $\mathcal{P}$.
-\item \textbf{Exponentiation:}
-  \texttt{\^{}} or \texttt{\textbackslash pow} rejected.
-\end{enumerate}
-
-Post-merge sanitisation rewrites local-variable
-\texttt{\textbackslash at} to plain references and drops any
-surviving exponentiation tokens.
-
-%% ============================================================
-\section{Dynamic Sampling Details}
-\label{app:sampling}
-%% ============================================================
-
-\subsection{Tiered Value Generation}
-
-For each parameter $v$ with domain $[\ell_v, u_v]$:
-\begin{align*}
-\mathcal{T}_0(v) &= \{0, 1, -1\} \cap [\ell_v, u_v]
-  && \text{(corners)} \\
-\mathcal{T}_1(v) &= \{2,\ldots,10\} \cap [\ell_v, u_v]
-  && \text{(small positives)} \\
-\mathcal{T}_2(v) &\subseteq \{11,\ldots,50\}
-  && \text{(5 medium values)} \\
-\mathcal{T}_3(v) &\subseteq \{51,\ldots,100\}
-  && \text{(3 large values)}
-\end{align*}
-
-\subsection{Phased Cartesian Sampling}
-
-Four phases fill a quota of $S_{\max}{=}20$ samples:
-(1)~corner-case tuples from $\prod_v \mathcal{T}_0(v)$;
-(2)~mixed tier 0+1 combinations ordered by total tier index;
-(3)~all tiers, prioritised similarly;
-(4)~biased random fill (80\% from $[0,20]$, 20\% from $[21,100]$).
-
-\subsection{Trace Formatting}
-
-At most $G{=}5$ trace groups per call; within each, at most
-$k_{\max}{=}10$ iteration snapshots (first and last halves retained
-if truncated).
+The reward framework is packaged as a slim container (no prover, no GPU dependencies) exposing
+\texttt{POST /reward} with body \texttt{\{program, rollouts[]\}} and response
+\texttt{\{rollout\_rewards[], base[], marginal[], rollouts[] (with rejection detail), batch\_score, should\_reroll\}}.
+Rollouts may be raw LLM text, invariant lists, or annotated code; parsing is uniform.
+An offline scorer provides the same computation over JSONL/Parquet rollout dumps for trainer-side batching.

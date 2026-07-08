@@ -2,93 +2,44 @@
 \section{Introduction}\label{sec:intro}
 %% ============================================================
 
-Loop invariant generation is a central challenge in program
-verification.
-Traditional
-approaches~\citep{cousot1977abstract,colon2003linear,flanagan2001houdini,daikon,nguyen2012using}
-handle specific loop families but generalise poorly and incur
-prohibitive analysis time.
-Recent LLM-based
-methods~\citep{chakraborty2024towards,pei2023can,kamath2023finding}
-bring fresh perspectives, yet universally rely on extensive SMT
-solving, complex multi-round workflows, and the most powerful
-closed-source models---revealing that the task remains exceptionally
-hard even for LLMs, demanding \emph{logical reasoning},
-\emph{program comprehension}, and \emph{formal annotation mastery}
-simultaneously.
+Loop invariants are the linchpin of deductive program verification.
+Ever since the inductive-assertion method of Floyd~\citep{floyd1967assigning} and the axiomatic semantics of Hoare~\citep{hoare1969axiomatic}, verifying a loop $\mathtt{while}\,(B)\,S$ against a contract $\{P\}\cdot\{Q\}$ has reduced to exhibiting an \emph{inductive invariant} $I$ satisfying initiation ($P \Rightarrow I$), consecution ($\{I \wedge B\}\,S\,\{I\}$), and safety ($I \wedge \neg B \Rightarrow Q$).
+Finding $I$ automatically has consequently been one of the most intensively studied problems in formal methods.
+Four decades of research have attacked it with abstract interpretation~\citep{cousot1977abstract,cousot1978automatic,karr1976affine}, constraint- and template-based synthesis~\citep{colon2003linear,sankaranarayanan2004non,gulwani2008program,gupta2009invgen}, interpolation and IC3/PDR-style generalization~\citep{mcmillan2003interpolation,bradley2011sat,komuravelli2014smt}, abductive inference~\citep{dillig2013inductive}, syntax-guided and stochastic search~\citep{alur2013sygus,fedyukovich2018syntax}, data-driven learning from program states~\citep{sharma2012interpolants,sharma2013data,garg2014ice,garg2016learning,padhi2016pie,zhu2018data,ezudheen2018horn}, neural architectures~\citep{si2018learning,si2020code2inv,ryan2020cln2inv,yao2020gcln}, and, most recently, large language models~\citep{pei2023can,kamath2023finding,chakraborty2023ranking,wu2024lemur,wen2024enchanting,liu2024towards}.
 
-The heavy dependence on closed-source APIs creates deployment
-bottlenecks: a single project may contain hundreds of loops, each
-requiring multiple sampling-and-verification rounds, incurring
-prohibitive token costs and latency.
-API uncontrollability---model updates, service interruptions, data
-privacy---further limits safety-critical deployment.
-Training a \emph{locally deployable} small model is therefore of
-considerable practical value.
+\paragraph{The target-dependence problem.}
+Despite their diversity, these lines of work share a common task definition: the input is a program \emph{together with a verification target}---a postcondition, assertion, or safety property $Q$---and the output is an invariant just strong enough to discharge $Q$.
+The target is not incidental; it is load-bearing.
+CEGIS- and ICE-style learners derive their counterexamples from failed attempts to prove $Q$~\citep{garg2014ice,garg2016learning,padhi2016pie}; Code2Inv shapes its reinforcement signal from the solver's rejection of $Q$-directed verification conditions~\citep{si2018learning,si2020code2inv}; LLM pipelines put the assertion in the prompt and score candidates by whether the verifier closes the goal~\citep{kamath2023finding,chakraborty2023ranking,wu2024lemur}.
 
-We focus on \emph{numerical} loop invariants---linear or polynomial
-inequalities over program variables whose verification is
-SMT-automatable.
-This preserves sufficient reasoning difficulty while keeping the
-formalisation barrier low, offering a unique lens to examine small
-models' integrated mathematical and programming abilities.
+We contend that this framing rests on an uncomfortable circularity.
+First, verification targets are \emph{scarce}: real code overwhelmingly ships without formal postconditions, and writing them is itself the specification bottleneck that specification mining and, lately, LLM-based specification generation have tried to relieve~\citep{daikon,endres2024can,ma2024specgen,wen2024enchanting}.
+Second, and more fundamentally, for loop programs the verification target is very often nothing more than \emph{the invariant itself evaluated at loop exit}.
+The safety condition $I \wedge \neg B \Rightarrow Q$ means that the natural $Q$ for a loop---the one a human or a benchmark author writes down---is the exit-time projection of an invariant the author already had in mind; Furia and Meyer make the reverse direction explicit by \emph{deriving} candidate invariants syntactically from postconditions~\citep{furia2010inferring}.
+A system that requires $Q$ in order to find $I$ therefore presupposes the very reasoning it is supposed to automate.
+Target-directed training compounds the problem: when the reward is ``did the verifier close $Q$,'' the learner is incentivized to produce the \emph{weakest} invariant sufficient for the given target---frequently a light rewriting of $Q$ itself---which transfers to no other property of the same loop.
 
-Realising this goal faces four challenges:
-\begin{enumerate}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{Data scarcity.}
-  Existing annotated corpora are extremely limited and carry
-  data-leakage risks.
-\item \textbf{Sparse feedback.}
-  The SMT verifier yields a binary pass/fail verdict; hand-crafted
-  reward shaping introduces human-prior bias and alignment risk.
-\item \textbf{Reward hackability.}
-  Trivially weak annotations
-  (e.g.\ \lstinline|loop invariant \true;|) pass the check
-  yet capture no program property.
-\item \textbf{Base-model bottleneck.}
-  GRPO-style RL~\citep{deepseekr1} requires multiple correct
-  rollouts, but weak models rarely produce any within a practical
-  sampling budget.
-\end{enumerate}
+\paragraph{Our reframing: inductive loop summaries.}
+We instead study the task of generating an inductive \emph{loop summary}: given only the precondition, guard, and body---\emph{no postcondition}---produce the strongest practically expressible inductive invariant characterizing the loop's reachable states at the loop head.
+This framing follows the tradition of loop summarization in static analysis and symbolic execution~\citep{kroening2008loop,godefroid2011automatic,xie2016proteus,farzan2015compositional,kincaid2017compositional}, but asks for summaries in the standard inductive-invariant form consumed by deductive verifiers (ACSL, checked by Frama-C/WP~\citep{framac,acsl}).
+A tight summary is strictly more useful than a target-directed invariant: it discharges \emph{every} downstream assertion $Q$ with $I \wedge \neg B \Rightarrow Q$, it is reusable across changing specifications, and generating it exercises exactly the semantic reasoning---conservation laws, relational couplings, progress bounds---that the target-directed setting lets a system shortcut.
 
-These constraints favour \emph{knowledge distillation} over
-RL~\citep{deepseekr1}: distillation transfers the teacher's reasoning
-trajectories directly, bypassing the autonomous exploration
-bottleneck.
-We choose GPT-5-nano as the teacher---bridging the student--teacher
-gap~\citep{deepseekr1} while keeping per-program token cost tractable.
+\paragraph{The reward problem, and why it is hard.}
+Dropping the target, however, destroys the training signal every prior learning-based system relied on: with no $Q$ there is no binary verified/failed outcome to optimize.
+``Is $I$ inductive?'' alone is useless as a reward---$\mathit{true}$, the guard, and any tautology are inductive.
+What must be rewarded is \emph{soundness plus tightness}: how much of the unreachable state space does the candidate provably exclude?
+We operationalize this with an execution-grounded dense reward.
+A sampler compiles and runs the instrumented loop over a deterministic input sweep to collect \emph{positive} loop-head states, then constructs \emph{truthful negatives}---trace units that are provably impossible under the loop's own dynamics---along two balanced dimensions: a \emph{relational} dimension (small perturbations off densely observed trace neighborhoods, exposing missing laws such as $x + y = n$) and a \emph{bound} dimension (post-exit continuations of real traces and box-escape states, exposing missing range facts).
+A candidate rollout is first reduced to its inductive core by Houdini-style pruning~\citep{flanagan2001houdini}, with Frama-C/WP as the authoritative backend, and the surviving subset is scored by the fraction of negative traces it rejects, plus a marginal (ablation) term for group-relative credit assignment.
 
-To address data scarcity, we build \lf{}, a DSL-based
-generator that synthesises diverse numerical loop programs with known
-semantic structure, eliminating data leakage by construction
-(Section~\ref{sec:loop-factory}).
-We then construct a unified \emph{sampling-and-filtering pipeline}
-(Section~\ref{sec:overview}) that serves both training data
-preparation and test-time inference, differing only in the scale of
-parallel teacher sampling.
-The pipeline decomposes candidates into conjuncts, filters them
-through syntax, trace-semantic, deduplication, Houdini, and
-triviality stages, and synthesises reverse chains-of-thought for the
-certified output.
-Survivors form \emph{chosen} samples; rejects become \emph{rejected}
-samples for DPO.
-Two augmentation strategies---off-policy conjunct recombination
-and on-policy student negatives---further enrich the preference
-signal.
-A two-stage SFT\,+\,DPO recipe completes the distillation
-(Section~\ref{sec:method}).
+Such a reward is a textbook target for reward hacking~\citep{amodei2016concrete,skalse2022defining,gao2023scaling}: a policy can memorize the sampled negative pool with sprays of disequalities, or fit sample-extreme bounding boxes, without learning anything semantic.
+We treat hack resistance as a first-class design requirement and harden the reward with a per-invariant complexity gate, a per-rollout atom budget, unique-kill junk discounting, and---crucially---multi-seed \emph{minimum} scoring against held-out sampling seeds whose input envelopes are decorrelated by seed-hashed far probes and tier jitter, so that any predicate fitted to one concrete sample collapses on the others while true invariants are seed-indifferent.
 
 \paragraph{Contributions.}
-\begin{enumerate}[leftmargin=1.5em,itemsep=1pt]
-\item \textbf{\lf{}}: a probabilistic DSL for
-  numerical loop synthesis overcoming data scarcity and leakage
-  (Section~\ref{sec:loop-factory}).
-\item \textbf{A multi-stage sampling-and-filtering pipeline}
-  integrating verifier feedback, semantic deduplication, trivial
-  invariant filtering, and reverse CoT synthesis to produce certified
-  annotations (Section~\ref{sec:method}).
-\item \textbf{An offline distillation strategy} with on-policy
-  augmentation, producing SFT\,+\,DPO training data grounded in
-  formal verification without online RL
-  (Section~\ref{sec:offline}).
-\end{enumerate}
+This paper makes the following contributions:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt, topsep=2pt]
+  \item \textbf{Task reframing.} We identify the target-dependence circularity in loop invariant generation and formulate the alternative task of \emph{closed-book inductive loop summary generation}, which subsumes target-directed generation ($\S$\ref{sec:overview}).
+  \item \textbf{An execution-grounded, hack-resistant reward.} We design a dense reward for this task built on truthful negatives---provably impossible traces constructed from the loop's own dynamics along relational and bound dimensions---with Houdini-pruned survival, trace-unit accounting, and a layered anti-hacking defense: complexity gate, atom budget, junk discounting, holdout-seed minimum scoring, far probes, tier jitter, slice caps, and dimension balancing ($\S$\ref{sec:method}).
+  \item \textbf{An open three-component pipeline.} \sam{} decomposes into an example sampler, a containerized HTTP reward service consumable by any RL trainer, and an inference framework with Houdini repair and Frama-C/WP certification ($\S$\ref{sec:overview}).
+  \item \textbf{Adversarial validation of the reward.} Three regression gates---a discrimination suite of gold/loose/adversarial invariant families, a gold-free hack sweep, and a mislabel audit over all generated negatives---pass with zero violations on 366 linear and nonlinear benchmark programs ($\S$\ref{sec:experiments}).
+\end{itemize}

@@ -2,17 +2,11 @@
 \section{Conclusion}\label{sec:conclusion}
 %% ============================================================
 
-We presented \sam{}, a system for certified numerical loop
-invariant generation comprising three contributions:
-\lf{} for scalable training data synthesis;
-a multi-stage sampling-and-filtering pipeline producing formally
-verified, non-trivial invariants;
-and an offline distillation strategy that embeds verifier feedback
-into SFT\,+\,DPO training data via reverse CoT synthesis and
-on-policy augmentation---with no human annotation or online RL.
+Loop invariant generation has been studied for four decades almost exclusively as a target-directed task, yet the verification target it presupposes is scarce in practice and is, for loops, typically the exit-time shadow of the very invariant being sought.
+We reframed the problem as \emph{closed-book inductive loop summary generation}---characterize the loop, not the goal---and showed that the missing ingredient for learning this task is not a verifier bit but a dense, execution-grounded, hack-resistant reward.
+\sam{} supplies it: truthful negatives constructed from the loop's own dynamics along relational and bound dimensions, Houdini-pruned survival for soundness, trace-unit scoring with group-relative marginal credit, and a layered defense (capacity gates, uniqueness discounting, holdout-seed minimum scoring over decorrelated samples) that our adversarial gates certify with zero violations over 366 linear and non-linear programs.
+The pipeline is deliberately modular---sampler, containerized reward service, certified inference---so that any RL trainer can optimize against it and any deductive toolchain can consume its output.
 
-Future work includes systematic fine-tuning experiments over
-successive training rounds, extension to heap-manipulating programs
-with separation-logic invariants, and integration of symbolic
-techniques (abstract interpretation, interpolation) for a hybrid
-symbolic--neural architecture.
+Beyond the immediate system, we see the two central ideas as portable.
+Truthful negatives generalize to any domain where a checker can certify impossibility more cheaply than it can certify optimality; minimum-scoring over decorrelated held-out samples is a general recipe for hardening finite-sample verifiable rewards.
+Future work includes scaling summaries to multi-loop and heap-manipulating programs~\citep{liu2024towards}, richer assertion languages (quantifiers, arrays), and closing the loop with the specification-generation literature: a tight loop summary is, after all, the specification.

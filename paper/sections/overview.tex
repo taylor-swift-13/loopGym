@@ -1,103 +1,71 @@
 %% ============================================================
-\section{System Overview}\label{sec:overview}
+\section{Problem Formulation and System Overview}\label{sec:overview}
 %% ============================================================
 
-\sam{} is built around a single unified pipeline
-(Figure~\ref{fig:pipeline}) that serves \emph{both} training-data
-synthesis and test-time inference.
-Given a C function with a \texttt{while} loop, precondition, and
-postcondition, the pipeline outputs ACSL-annotated code verified by
-Frama-C/WP.
-During training data preparation it additionally produces SFT and DPO
-records; at inference time those stages are simply deactivated.
-Table~\ref{tab:mode-diff} summarises which components are active in
-each mode.
+\subsection{From Target-Directed Invariants to Loop Summaries}
+\label{sec:overview:task}
 
-\begin{figure}[t]
-\centering
-\begin{stepbox}[\sam{} Pipeline]
-\begin{enumerate}[leftmargin=1.5em,itemsep=2pt,label={\small\ding{\numexpr181+\value{enumi}\relax}}]
-\item \textbf{Dynamic Sampling} --- Execute with tiered
-      inputs; collect per-iteration variable traces.
-\item \textbf{Parallel LLM Generation} --- $N$ calls with
-      diverse temperatures; decompose into conjuncts and union.
-\item \textbf{ACSL Syntax Filter} --- Reject
-      structurally invalid conjuncts.
-\item \textbf{Trace Semantic Filter} --- Discard
-      conjuncts falsified by observed states.
-\item \textbf{Semantic Deduplication} --- Collapse
-      logically equivalent conjuncts via auxiliary LLM.
-\item \textbf{Houdini Formal Pruning} --- Iteratively
-      remove non-inductive conjuncts via Frama-C/WP.
-\item \textbf{Trivial Invariant Filter} --- Exclude
-      formally correct but semantically vacuous invariants.
-\item \textbf{Reverse CoT \& Distillation} ---
-      Synthesise reasoning chains; construct chosen/rejected pairs;
-      augment and train via SFT\,+\,DPO.
-\end{enumerate}
+Fix a loop program $P = (\phi_{\mathrm{pre}}, B, S)$ over integer variables $V$: a precondition $\phi_{\mathrm{pre}}$, a guard $B$, and a body $S$.
+A \emph{state} $\sigma : V \to \mathbb{Z}$ is a valuation of $V$ (together with the pre-state values $v_0$ of parameters, so that summaries may relate current to initial values).
+Let $\mathcal{R}(P)$ denote the set of states reachable \emph{at the loop head} from some initial state satisfying $\phi_{\mathrm{pre}}$.
+
+\begin{definition}[Inductive invariant]
+A predicate $I$ over $V$ is an inductive invariant of $P$ if
+(i) \emph{initiation}: every loop-head state reached directly from $\phi_{\mathrm{pre}}$ satisfies $I$; and
+(ii) \emph{consecution}: $\{I \wedge B\}\, S\, \{I\}$.
+Equivalently, $I \supseteq \mathcal{R}(P)$ and $I$ is closed under the loop's transition relation.
+\end{definition}
+
+\begin{definition}[Target-directed generation]
+Given $(P, Q)$, produce any inductive $I$ with $I \wedge \neg B \Rightarrow Q$.
+\end{definition}
+
+\begin{definition}[Inductive loop summary generation (ours)]
+Given $P$ alone, produce an inductive $I$ that is as \emph{tight} as practically expressible: among predicates in the assertion language, $I$ should exclude as much of the unreachable space $\overline{\mathcal{R}(P)}$ as possible.
+The ideal object is the strongest inductive invariant, i.e.\ (the assertion-language best approximation of) $\mathcal{R}(P)$ itself.
+\end{definition}
+
+The summary task subsumes the target-directed one: any $Q$ provable from \emph{some} inductive invariant is provable from the strongest one.
+It is also strictly harder to game.
+In the target-directed task, $Q$ itself (weakened to pass initiation) is often an acceptable answer; in the summary task there is no $Q$ to parrot, and weak answers---$\mathit{true}$, the guard, loose boxes---are exactly what the reward of $\S$\ref{sec:method} is designed to score low.
+
+In practice a summary is a \emph{set} of ACSL clauses
+$\texttt{loop invariant } e_1; \dots; \texttt{loop invariant } e_k;$
+whose conjunction is the invariant; typical summaries pair one or two relational laws (e.g.\ $x = y \cdot z$ preserved by the body) with progress bounds (e.g.\ $0 \le i \le n$).
+Soundness is never entrusted to the learner: every clause set is reduced to its greatest inductive subset by Houdini pruning~\citep{flanagan2001houdini} over Frama-C/WP~\citep{framac} before it is scored or reported, so the system's output is certified by construction.
+
+\subsection{System Overview}
+\label{sec:overview:system}
+
+\sam{} decomposes into three components that share a common core (a lightweight C/ACSL program model and a safe ACSL predicate evaluator) but are independently deployable:
+
+\begin{stepbox}[1. Example sampler (\S\ref{sec:method:sampler})]
+Compiles and executes the instrumented loop over a deterministic, precondition-respecting input sweep; emits \emph{positive} loop-head states (real trace states) and \emph{truthful negative} trace units (provably impossible histories) along a relational and a bound dimension.
+The sampler sees only $(\phi_{\mathrm{pre}}, B, S)$---never the postcondition.
 \end{stepbox}
-\caption{\sam{} pipeline.
-\ding{182}--\ding{183}: generation;
-\ding{184}--\ding{188}: multi-stage filtering;
-\ding{189}: distillation.}
-\label{fig:pipeline}
-\end{figure}
 
-\begin{table}[t]
-\caption{Component activation under the two operating modes.
-The generation--filtering pipeline (\ding{182}--\ding{188}) is
-shared; distillation components (\ding{189}) are training-only.}
-\label{tab:mode-diff}
-\centering
-\small
-\begin{tabular}{@{}lcc@{}}
-\toprule
-\textbf{Component} & \textbf{Training} & \textbf{Inference} \\
-\midrule
-Dynamic Sampling (\ding{182})          & \cmark & \cmark \\
-LLM caller (\ding{183})               & teacher $\mathcal{M}_T$, $N$ large & student $\mathcal{M}_S$, $N$ small \\
-Multi-stage filtering (\ding{184}--\ding{188}) & \cmark & \cmark \\
-\midrule
-\multicolumn{3}{@{}l}{\textit{Training-only (\ding{189}):}} \\
-\quad Reverse CoT synthesis            & \cmark & --- \\
-\quad DPO pair construction            & \cmark & --- \\
-\quad Data augmentation                & \cmark & --- \\
-\bottomrule
-\end{tabular}
-\end{table}
+\begin{stepbox}[2. Reward framework (\S\ref{sec:method:reward}--\S\ref{sec:method:antihack})]
+Scores a \emph{group} of rollouts (candidate clause sets sampled for the same program, as in group-relative RL~\citep{shao2024deepseekmath}).
+Each rollout is reduced to its surviving inductive core, then scored by the fraction of negative traces it rejects (base), its ablation gain over the rest of the group (marginal), and a junk discount; scores are minimized across independent and held-out sampling seeds.
+Packaged as a slim containerized HTTP service (\texttt{POST /reward}) so any RL trainer can consume it, plus an offline JSONL/Parquet scorer.
+\end{stepbox}
 
-\paragraph{Phase~I: Generation (\ding{182}--\ding{183}).}
-The program is first executed under tiered inputs to collect
-execution traces $\mathcal{T}$.
-The value domain is partitioned into four tiers of increasing
-magnitude---corner values ($0, \pm1$), small positives ($2$--$5$),
-medium values ($6$--$50$), and large values ($51$--$500$)---and
-inputs are drawn in phases of increasing tier complexity to cover
-both boundary and interior behaviour.
-To fit LLM context limits, each trace retains the first and last $k$
-iterations (default $k{=}3$); traces are grouped into at most $G$
-groups (default $G{=}10$).
-A structured \emph{loop context} is then assembled from the traces,
-a static-analysis record (loop guard, variable scopes, pre-condition),
-and a symbolically derived transition relation
-(Section~\ref{sec:loop-context}).
-$N$ parallel LLM calls at diverse temperatures each return a CoT
-reasoning trace and candidate invariants; all invariant expressions
-are decomposed into conjuncts and unioned into a single pool
-$C_{\mathrm{pool}}$.
-During training, the teacher $\mathcal{M}_T$ is called with a large
-$N$ to maximise conjunct coverage; at inference, the student
-$\mathcal{M}_S$ is called with a smaller $N$.
+\begin{stepbox}[3. Inference framework (\S\ref{sec:method:inference})]
+Prompts the policy \emph{closed-book} (postcondition stripped) for the strongest ACSL invariants; unions $n$ rollouts, deduplicates, Houdini-prunes, re-annotates, and certifies with Frama-C/WP, re-rolling on failure.
+Supports cloud APIs and in-process batched vLLM for RL evaluation.
+\end{stepbox}
 
-\paragraph{Phase~II: Multi-Stage Filtering (\ding{184}--\ding{188}).}
-Five filters of increasing cost refine the pool to a certified,
-non-trivial invariant set $C^*$ (Section~\ref{sec:filtering}).
-Every surviving conjunct is formally verified by Frama-C/WP.
-This phase is identical in both modes.
+A fourth ingredient---three adversarial evaluation gates (discrimination, hack sweep, mislabel audit)---is not part of the serving path but guards the reward's integrity as a regression suite ($\S$\ref{sec:experiments}).
 
-\paragraph{Phase~III: Distillation (\ding{189}).}
-Active only during training.
-A reverse CoT model synthesises a reasoning chain for $C^*$.
-The result forms the \emph{chosen} sample; rejected candidates
-become DPO negatives (Section~\ref{sec:offline}).
-Tiered sampling details are in Appendix~\ref{app:sampling}.
+\paragraph{Running example.}
+Consider a benchmark loop (abridged from our linear suite):
+\begin{lstlisting}
+void foo(int n) {  // requires n >= 0
+  int x = 0, y = n;
+  while (y > 0) { x = x + 1; y = y - 1; }
+}
+\end{lstlisting}
+The sampler observes loop-head states such as $(x{=}0, y{=}5)$, $(x{=}1, y{=}4)$, \dots for $n{=}5$ and many other inputs.
+Relational negatives perturb dense trace neighborhoods---$(x{=}2, y{=}4)$ with $n{=}5$ breaks $x + y = n$; bound negatives continue past the real exit---$(x{=}6, y{=}{-}1)$ preserves $x+y=n$ yet is impossible.
+The summary $\{x + y = n,\; 0 \le y \le n\}$ (with $n \ge 0$ from the precondition) rejects every negative trace and is seed-indifferent, scoring $\approx 1$; the guard restatement $y \ge 0$ rejects only bound negatives on one axis; a sprayed disequality farm rejects canonical negatives but collapses to the minimum on the held-out seed.
+Any exit-time fact a user later cares about---$x = n$, $y = 0$, $x \ge y$---follows from the summary, though the generator never saw such a target.

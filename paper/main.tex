@@ -1,6 +1,6 @@
 %%
-%% SAM2INV: A Sampling-and-Filtering Framework with Offline Policy Exploration
-%%          for Certified Loop Invariant Generation
+%% SAM2INV: Invariants without Targets — Learning Inductive Loop Summaries
+%%          with Execution-Grounded, Hack-Resistant Rewards
 %% NeurIPS 2024 Format
 %%
 \documentclass[11pt]{article}
@@ -160,10 +160,9 @@
 \newcommand{\cmark}{\ding{51}}
 \newcommand{\xmark}{\ding{55}}
 \newcommand{\sam}{\textsc{SAM2INV}}
-\newcommand{\lf}{\textsc{LoopFactory}}
 
 %% Meta
-\title{A Sampling-and-Filtering Framework with Offline Policy Exploration\\for Certified Loop Invariant Generation}
+\title{Invariants without Targets: Learning Inductive Loop Summaries\\with Execution-Grounded, Hack-Resistant Rewards}
 
 \author{
   Anonymous Author(s)\\
@@ -176,12 +175,12 @@
 \maketitle
 
 \begin{abstract}
-Loop invariant generation is a central challenge in program verification.
-Existing LLM-based approaches rely on extensive SMT solving, complex workflows, and the most powerful closed-source models, yet still struggle with this task---which demands logical reasoning, program comprehension, and mastery of formal annotation syntax.
-We present \sam{}, a system that trains a small, locally deployable model to generate high-quality numerical loop invariants through offline knowledge distillation with verifier feedback.
-To overcome training-data scarcity, we design \lf{}, a probabilistic DSL constrained by semantic templates that synthesises structured numeric loop programs at arbitrary scale.
-We then build a multi-stage sampling-and-filtering pipeline: $N$ parallel LLM calls are decomposed into conjuncts, unioned into a single pool, and filtered through syntax validation, execution-trace semantic checking, semantic deduplication, Houdini formal pruning via Frama-C/WP, and trivial-invariant exclusion---producing certified annotations.
-Rather than applying reinforcement learning---whose binary verifier reward is too sparse, reward-hackable, and ineffective for weak base models---we adopt a distillation strategy: a lightweight teacher model explores multiple candidates per program during data preparation; the verification pipeline filters them into chosen and rejected examples with reverse chain-of-thought synthesis; and the student is fine-tuned via SFT followed by DPO, with on-policy negative-sample augmentation, transferring the teacher's exploration benefit with no human annotation or online reward model.
+Loop invariant generation is a central challenge in program verification, and four decades of work---abstract interpretation, constraint solving, data-driven learning, and most recently large language models---have framed it almost uniformly as a \emph{target-directed} task: given a program \emph{and a verification target} (a postcondition or assertion), find an inductive invariant strong enough to discharge the target.
+We argue that this framing rests on a circularity that limits practical impact: verification targets are scarce in real code, writing them is itself the specification bottleneck, and for loop programs the target is typically nothing but the projection of an invariant at loop exit ($I \wedge \neg B \Rightarrow Q$)---whoever wrote $Q$ had already done the invariant reasoning.
+We therefore reframe the task as generating an \emph{inductive loop summary}: the strongest practically expressible inductive invariant that characterizes a loop's reachable states, synthesized \emph{closed-book}, with no postcondition visible to the generator.
+Removing the target removes the binary verifier signal that prior learning approaches optimize, so we develop an execution-grounded dense reward suitable for reinforcement learning: candidate invariants are first reduced to an inductive subset by Houdini-style pruning, then scored by the fraction of \emph{truthful negatives}---trace units that are provably impossible under the loop's dynamics, constructed along a relational dimension and a bound dimension---that the surviving subset rejects.
+Because such a reward is a natural target for reward hacking, we harden it with a complexity gate, a per-rollout atom budget, unique-kill junk discounting, and multi-seed minimum scoring against held-out sampling seeds backed by seed-hashed far probes and tier jitter, making memorization and predicate-spraying strictly dominated by genuine invariants.
+The result, \sam{}, is an open three-component pipeline---sampler, reward service, and inference framework---in which the reward passes three adversarial validation gates (discrimination, hack sweep, and mislabel audit) with zero violations over 366 linear and nonlinear benchmark programs, and generated summaries are certified end-to-end by Frama-C/WP.
 \end{abstract}
 
 %% ============================================================
@@ -189,7 +188,6 @@ Rather than applying reinforcement learning---whose binary verifier reward is to
 \input{sections/related}
 \input{sections/overview}
 \input{sections/method}
-\input{sections/loop_factory}
 \input{sections/experiments}
 \input{sections/conclusion}
 

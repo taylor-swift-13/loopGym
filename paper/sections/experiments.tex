@@ -2,32 +2,52 @@
 \section{Experiments}\label{sec:experiments}
 %% ============================================================
 
-%% TODO: Fill in experimental results.
-%% Suggested structure:
-%%
-%% \subsection{Experimental Setup}
-%%   - Benchmarks: NLA suite, LoopFactory-generated programs
-%%   - LLM models: GPT-4o, GPT-5-nano, DeepSeek-V3.1
-%%   - Baselines: Daikon, DIG, direct GPT-4 prompting
-%%   - Metrics: success rate, #LLM queries, #Frama-C calls, token cost
-%%   - Hardware / timeout configuration
-%%
-%% \subsection{RQ1: Overall Effectiveness}
-%%   - Table: per-benchmark success rate
-%%   - Comparison with baselines
-%%
-%% \subsection{RQ2: Ablation Study}
-%%   - Effect of smart sampling vs. random sampling
-%%   - Effect of parallel diverse generation (N=1 vs N=5 vs N=20)
-%%   - Effect of Houdini pruning
-%%   - Effect of generation mode (code_only vs fit_only vs hybrid)
-%%
-%% \subsection{RQ3: Scalability on Synthetic Benchmarks}
-%%   - Success rate vs. program complexity (nesting depth, variable count)
-%%   - Token cost analysis
-%%
-%% \subsection{RQ4: Vector Cache Effectiveness}
-%%   - Cache hit rate over time
-%%   - Reduction in LLM queries for similar programs
-%%
-%% \subsection{Threats to Validity}
+\subsection{Setup}
+\label{sec:exp:setup}
+
+\paragraph{Benchmarks.}
+We evaluate on 366 C loop programs in two suites.
+\textbf{Linear} (316 programs) contains single-loop affine programs in the style of SV-COMP loop tracks~\citep{svcomp}; roughly 40\% use nondeterministic guards or branches (\texttt{unknown()}), exercising the sampler's soundness rescues.
+\textbf{NLA} (50 programs) contains the standard non-linear arithmetic suite~\citep{nguyen2012using,nla2019}: polynomial identities (cubes, geometric sums), gcd/extended-gcd, and division-by-subtraction algorithms whose summaries require products and higher-degree terms (e.g.\ $y = 3n^2 + 3n + 1$, $ps - rq = 1$, $z = xy$).
+Every program carries a trailing assertion; it is used \emph{only} for final end-to-end checking and is hidden from the sampler and the generator throughout.
+
+\paragraph{Backends and configuration.}
+Positives/negatives are sampled with 12 runs per seed under the canonical 20-tier sweep; inductiveness and final certification use Frama-C/WP with Z3 (30\,s per goal, Typed memory model); reward weights and caps are the defaults of $\S$\ref{sec:method:reward}.
+The reward runs as a slim container (no prover, no GPU dependencies) and scores a rollout group in the low seconds per program, dominated by Houdini when the prover is enabled.
+
+\subsection{Adversarial Validation of the Reward}
+\label{sec:exp:gates}
+
+A reward for RL is only as good as its worst exploit, so before any policy training we validate the reward itself with three adversarial regression gates run across both suites.
+
+\paragraph{Gate 1: discrimination.}
+For each program we score hand-constructed families: \emph{gold} (true tight summaries), \emph{loose} (sound but weak, e.g.\ guard restatements, slack boxes), and \emph{adversarial} (mega-conjunctions, split sprays, gold-plus-spray, sample-extreme boxes, pointwise farms).
+The gate requires the strict quality order $\mathrm{gold} \ge \mathrm{loose} > \mathrm{hack}$ pointwise, memorizers at least $0.15$ below gold, and sample-extreme boxes collapsing on the holdout seed.
+\textbf{Result: 0 violations.}
+
+\paragraph{Gate 2: gold-free hack sweep.}
+Independent of any gold reference, parametric adversary families sweep their capacity (clause counts, atom counts, farm sizes) against every program; the gate requires that no adversary configuration attains the reward of a true summary on any program.
+\textbf{Result: 0 violations.}
+
+\paragraph{Gate 3: mislabel audit.}
+Truthfulness of negatives is audited directly: every emitted negative trace unit is re-checked against exhaustive forward reachability within the audited window, and any reachable state labeled negative is a hard failure (it would penalize true invariants).
+\textbf{Result: 0 hard mislabels} across all 366 programs, including the nondeterministic subset where negatives come only from the rescue constructions.
+
+Together the gates certify the two properties a hack-resistant verifiable reward needs: \emph{soundness} (no true invariant is punished) and \emph{discrimination} (no known exploit outscores truth).
+They run as a regression suite, so any future change to the sampler or reward must re-pass them.
+
+\subsection{Policy Training and End-to-End Generation}
+\label{sec:exp:rl}
+
+%% TODO(experiments): fill in once RL runs complete.
+%% - Base models: Qwen-2.5-Coder-7B (local vLLM), GPT-5-nano (API reference)
+%% - Trainer: GRPO against the HTTP reward service; n rollouts/group = 8
+%% - Metrics: (a) mean final reward (summary tightness) on held-out programs;
+%%   (b) Frama-C-certified summary rate (closed-book);
+%%   (c) downstream: fraction of benchmark assertions discharged by the
+%%       generated summary alone (I ∧ ¬B ⇒ Q via WP), WITHOUT showing Q;
+%%   (d) ablations: -holdout, -junk, -atom budget, -far probes/jitter
+%%       (expect reward inflation + hack families reappearing);
+%%   (e) open-book vs closed-book comparison.
+Policy-training results are in progress and will be reported in the final version: we train a locally deployable code model with GRPO against the containerized reward service, and evaluate (a) summary tightness on held-out programs, (b) the Frama-C-certified summary rate, and (c) the \emph{downstream} rate at which the closed-book summary alone discharges the benchmark's hidden assertion---the direct test of the claim that summaries subsume targets.
+Ablations remove each anti-hacking layer in turn; by construction of the gates in $\S$\ref{sec:exp:gates} we can measure not only reward inflation but the reappearance of specific exploit families.
