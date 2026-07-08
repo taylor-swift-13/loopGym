@@ -92,12 +92,24 @@ _FAR_BAND = 149          # probe k roams band [65 + k*149, 65 + (k+1)*149)
 
 def _far_probe(params: List[str], cons: Dict[str, Dict[str, int]],
                seed: int, k: int) -> Dict[str, int]:
+    """Probe k < _FAR_COUNT: independent signed magnitudes per param.
+    Probe k >= _FAR_COUNT: ORDERED all-positive tuples (descending for even k,
+    ascending for odd), so multi-param programs whose deep states need
+    `0 < p_i < p_j` at scale (e.g. a remainder counting up to a large divisor)
+    get their real range witnessed — sign-independent probes almost never
+    produce ordered positive pairs, leaving envelope holes that sample-extreme
+    boxes memorize."""
     vals: Dict[str, int] = {}
+    ordered = k >= _FAR_COUNT
     for j, p in enumerate(params):
         h = (seed * 1000003 + k * 8191 + j * 131) % _FAR_BAND
-        mag = min(65 + k * _FAR_BAND + h, _FAR_MAX)
-        if (seed + k + j) % 2:
-            mag = -mag
+        if ordered:
+            rank = j if k % 2 else (len(params) - 1 - j)
+            mag = max(65, _FAR_MAX - rank * (_FAR_MAX // max(2, len(params))) - h)
+        else:
+            mag = min(65 + k * _FAR_BAND + h, _FAR_MAX)
+            if (seed + k + j) % 2:
+                mag = -mag
         lo = cons.get(p, {}).get("min")
         hi = cons.get(p, {}).get("max")
         if lo is not None and mag < lo:
@@ -174,10 +186,14 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
         return True
 
     # phase 0 — seed-hashed far probes (guaranteed slots): every seed's input
-    # envelope differs, so sample-extreme boxes cannot generalize across seeds
+    # envelope differs, so sample-extreme boxes cannot generalize across seeds.
+    # Probes _FAR_COUNT.._FAR_COUNT+1 are the ORDERED all-positive tuples
+    # (see _far_probe) — only emitted for multi-param programs, where ordering
+    # exists at all
     if params:
-        for k in range(_FAR_COUNT):
-            if len(runs) >= max(n_runs, _FAR_COUNT):
+        probe_count = _FAR_COUNT + (2 if len(params) > 1 else 0)
+        for k in range(probe_count):
+            if len(runs) >= max(n_runs, probe_count):
                 break
             admit(_far_probe(params, cons, seed, k))
     # phase 1 — diverse stripe tuples (all params move together)

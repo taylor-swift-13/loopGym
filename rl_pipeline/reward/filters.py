@@ -82,12 +82,18 @@ def representative_positives(positives: List[State]) -> List[State]:
     return [positives[i] for i in sorted(idxs)]
 
 
-# Disequality atoms are checked against the FULL per-variable value sets, not
-# the state subsample: `v != c` is violated by exactly the positives where
-# v == c, and an adversary who knows the (deterministic) subsample stride can
-# pick c from the skipped states — sound-looking on the subsample, unsound in
-# truth, and it still rejects negatives sharing that value.
+# Single-variable predicates are checked against the FULL per-variable value
+# sets, not the state subsample: `v != c` (and any interval / modular variant)
+# is violated by exactly the positives whose v-value falsifies it, and an
+# adversary who knows the (deterministic) subsample stride can pick constants
+# from the skipped states — sound-looking on the subsample, unsound in truth,
+# and still rejecting negatives that share those values.
 _DISEQ_RE = re.compile(r"^\s*(?:!\s*\(\s*(\w+)\s*==\s*(-?\d+)\s*\)|(\w+)\s*!=\s*(-?\d+))\s*$")
+# window-exclusion fast path: `!(A <= v && v <= B)` — exact at any value-set size
+_IVAL_RE = re.compile(
+    r"^\s*!\s*\(\s*(-?\d+)\s*<=?\s*(\w+)\s*&&\s*(\w+)\s*<=?\s*(-?\d+)\s*\)\s*$")
+# generic single-var exact check is an eval per observed value — cap the scan
+_MAX_EXACT_VALUES = 20000
 
 
 class PositiveFilter:
@@ -127,16 +133,43 @@ class PositiveFilter:
             #  of the whole file).
             if out_of_scope_ids(cond, prog.pre_vars):
                 continue
-            # disequality atoms get an EXACT check against all observed values
-            m = _DISEQ_RE.match(cond)
-            if m:
-                v, c = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-                if int(c) in values.get(v, ()):
-                    continue
+            # single-variable predicates get an EXACT check against all
+            # observed values of that variable (see comment on _DISEQ_RE)
+            if self._exact_single_var_unsound(cond, values):
+                continue
             unsound = any(eval_predicate(cond, s) is False for s in sample)
             if not unsound:
                 kept.append(cond)
         return kept
+
+    @staticmethod
+    def _exact_single_var_unsound(cond: str, values: dict) -> bool:
+        """True iff `cond` constrains a single program variable and some
+        OBSERVED value of that variable falsifies it.  Fast paths for the two
+        farm shapes (`v != c`, `!(a <= v && v <= b)`), generic per-value eval
+        for everything else (modular tricks, shifted windows, …)."""
+        m = _DISEQ_RE.match(cond)
+        if m:
+            v, c = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            return int(c) in values.get(v, ())
+        m = _IVAL_RE.match(cond)
+        if m and m.group(2) == m.group(3):
+            v = m.group(2)
+            a, b = int(m.group(1)), int(m.group(4))
+            vv = values.get(v)
+            return bool(vv) and any(a <= val <= b for val in vv)
+        if "\\" in cond:                     # \at(...) references the pre-state
+            return False
+        ids = set(re.findall(r"[A-Za-z_]\w*", cond)) - _ACSL_STOPWORDS
+        prog_ids = [i for i in ids if i in values]
+        if len(prog_ids) != 1 or len(ids) != 1:
+            return False
+        v = prog_ids[0]
+        vv = values[v]
+        if len(vv) > _MAX_EXACT_VALUES:      # fall back to the state subsample
+            return False
+        return any(eval_predicate(cond, State(vars={v: val}, pre={})) is False
+                   for val in vv)
 
 
 class HoudiniFilter:

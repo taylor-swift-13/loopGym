@@ -110,6 +110,9 @@ SPECS: Dict[str, Dict[str, object]] = {
     "NLA_lipus/15.c": { # c,y count, x=sum(1..y)            nonlinear relation
         "gold": ["c == y", "2*x == y*y + y", "0 <= c", "c <= k"],
         "loose": ["c == y", "0 <= c"],
+        # requires k <= 30 bounds the INPUT space itself, so the sampled
+        # extremes (c,y <= 30, x <= 465) are contract truth, not overfit
+        "box_true": True,
     },
     "NLA_lipus/1.c": {  # cubic series                      nonlinear, multi-relation
         "gold": ["z == 6*n + 6", "y == 3*n*n + 3*n + 1", "x == n*n*n", "n >= 0", "n <= a + 1"],
@@ -124,25 +127,11 @@ SPECS: Dict[str, Dict[str, object]] = {
         "loose": ["p*s - r*q == 1", "a >= 1"],
         "post_is_invariant": True,
     },
-    "linear/301.c": {   # while(i<n) i+=6 or i+=3            gcd-lattice + monotone rescue
-        "gold": ["i % 3 == 0", "i >= 0", "n > 0 ==> i <= n + 5", "n <= 0 ==> i == 0"],
-        "loose": ["i >= 0"],
-        "post_is_invariant": True,
-    },
-    "linear/173.c": {   # 3-state machine                    rigid pair + literal-set rescue
-        "gold": ["x == y", "i >= j", "j == 0", "i >= 0", "0 <= turn", "turn <= 2"],
-        "loose": ["i >= j"],
-        "post_is_invariant": True,
-        # no params: entry is fixed, every var is monotone-from-0 or a literal
-        # set, so the box's floors and the turn range are input-independent
-        # TRUTH — only its upper bounds are (mildly holdout-punished) overfit
-        "box_true": True,
-    },
-    "linear/45.c": {    # counter with reset (c++/c=1 under unknown())  monotone-floor rescue
-        "gold": ["0 <= c", "c <= n"],
-        "loose": ["-10 <= c"],
-        "post_is_invariant": True,
-    },
+    # NOTE: linear/301.c, linear/173.c, linear/45.c were removed from SPECS
+    # when the nondeterminism rescue layer (rigid-pair / lattice / monotone /
+    # guarded-bound negatives) was dropped for simplicity: their negatives were
+    # entirely rescue-generated, so they now yield zero signal (sound, just
+    # uninformative) and cannot support a gold-vs-hack comparison.
 }
 
 DISEQ_BUDGET = 16          # adversary's clause budget for the pointwise farm
@@ -221,6 +210,111 @@ def mod_hacks(examples, gold: List[str], budget: int = MOD_BUDGET) -> List[str]:
             if len(out) >= budget:
                 return out
     return out
+
+
+def interval_farm(examples, budget: int = 16, max_width: int = 200) -> List[str]:
+    """ADVERSARY: window exclusions `!(a <= v && v <= b)` over positive-free
+    value bands — the INTERVAL generalization of the diseq farm.  2 atoms per
+    clause; each clause kills every negative whose v-value falls in the band,
+    and a band (unlike an exact value) survives per-seed delta hashing as long
+    as the negatives CLUSTER.  Defeated only by (a) the exact single-var
+    soundness check and (b) decade-spread negative placement."""
+    pos_vals = _pos_value_sets(examples)
+    per_var: Dict[str, Counter] = {}
+    for s in examples.neg(0):
+        for v, val in s.vars.items():
+            if val not in pos_vals.get(v, ()):
+                per_var.setdefault(v, Counter())[val] += 1
+    clauses = []
+    for v, cnt in per_var.items():
+        vals = sorted(cnt)
+        pv = pos_vals.get(v, set())
+        i = 0
+        while i < len(vals):
+            j, weight = i, cnt[vals[i]]
+            while (j + 1 < len(vals) and vals[j + 1] - vals[i] <= max_width
+                   and not any(p in pv for p in range(vals[j] + 1, vals[j + 1] + 1))):
+                j += 1
+                weight += cnt[vals[j]]
+            clauses.append((weight, f"!({vals[i]} <= {v} && {v} <= {vals[j]})"))
+            i = j + 1
+    clauses.sort(key=lambda t: -t[0])
+    return [c for _w, c in clauses[:budget]]
+
+
+def delta_interval_farm(examples, budget: int = 16, max_width: int = 200) -> List[str]:
+    """ADVERSARY: the interval farm in `v - \\at(v,Pre)` space — transfers on
+    parameterized programs where absolute windows do not."""
+    pos_d: Dict[str, set] = {}
+    for p in examples.pos(0):
+        for v, val in p.vars.items():
+            if v in p.pre:
+                pos_d.setdefault(v, set()).add(val - p.pre[v])
+    per_var: Dict[str, Counter] = {}
+    for s in examples.neg(0):
+        for v, val in s.vars.items():
+            if v in s.pre:
+                d = val - s.pre[v]
+                if d not in pos_d.get(v, ()):
+                    per_var.setdefault(v, Counter())[d] += 1
+    clauses = []
+    for v, cnt in per_var.items():
+        vals = sorted(cnt)
+        pv = pos_d.get(v, set())
+        i = 0
+        while i < len(vals):
+            j, weight = i, cnt[vals[i]]
+            while (j + 1 < len(vals) and vals[j + 1] - vals[i] <= max_width
+                   and not any(p in pv for p in range(vals[j] + 1, vals[j + 1] + 1))):
+                j += 1
+                weight += cnt[vals[j]]
+            clauses.append(
+                (weight, f"!({vals[i]} <= {v} - \\at({v},Pre) && {v} - \\at({v},Pre) <= {vals[j]})"))
+            i = j + 1
+    clauses.sort(key=lambda t: -t[0])
+    return [c for _w, c in clauses[:budget]]
+
+
+def pair_window_farm(examples, budget: int = 16, max_width: int = 200) -> List[str]:
+    """ADVERSARY: window exclusions in CONSERVED-EXPRESSION space — for 2-var
+    linear combos E ∈ {u−w, u+w}, small relation perturbations cluster within
+    a few units of the reachable E-manifold, so `!(a <= u−w && u−w <= b)` can
+    memorize the whole single-axis family across seeds.  Sound on the sample
+    whenever no positive E-value falls in the band.  Defeated by far relation
+    deltas (they spread E by decades) — not by the single-var exact check
+    (E references two variables)."""
+    pos = examples.pos(0)
+    negs = examples.neg(0)
+    if not pos:
+        return []
+    names = sorted(pos[0].vars)
+    clauses = []
+    for a_i in range(len(names)):
+        for b_i in range(a_i + 1, len(names)):
+            u, w = names[a_i], names[b_i]
+            for cu, cw, expr in ((1, -1, f"{u} - {w}"), (1, 1, f"{u} + {w}")):
+                pos_e = {cu * p.vars[u] + cw * p.vars[w] for p in pos
+                         if u in p.vars and w in p.vars}
+                cnt: Counter = Counter()
+                for s in negs:
+                    if u in s.vars and w in s.vars:
+                        e = cu * s.vars[u] + cw * s.vars[w]
+                        if e not in pos_e:
+                            cnt[e] += 1
+                vals = sorted(cnt)
+                i = 0
+                while i < len(vals):
+                    j, weight = i, cnt[vals[i]]
+                    while (j + 1 < len(vals) and vals[j + 1] - vals[i] <= max_width
+                           and not any(p in pos_e
+                                       for p in range(vals[j] + 1, vals[j + 1] + 1))):
+                        j += 1
+                        weight += cnt[vals[j]]
+                    clauses.append(
+                        (weight, f"!({vals[i]} <= {expr} && {expr} <= {vals[j]})"))
+                    i = j + 1
+    clauses.sort(key=lambda t: -t[0])
+    return [c for _w, c in clauses[:budget]]
 
 
 def state_memorizer(examples, budget: int = 256) -> List[str]:
@@ -395,6 +489,10 @@ def evaluate_program(rel_path: str, spec: Dict[str, object],
         "diseq_farm512": diseq_farm(examples, budget=512),
         "state_mem": state_memorizer(examples),
         "chunked_conj": chunked_conjunction(examples),
+        "ival_farm": interval_farm(examples),
+        "ival_wide": interval_farm(examples, max_width=5000),
+        "dival_farm": delta_interval_farm(examples),
+        "pair_window": pair_window_farm(examples),
         "const_bound": const_bounds(examples),
         "delta_bound": delta_bounds(examples),
         "mod_hack": mod_hacks(examples, gold),
@@ -425,11 +523,17 @@ def evaluate_program(rel_path: str, spec: Dict[str, object],
     if rewards.get("loose", 0.0) > g + eps:
         v.append(f"loose beats gold: {rewards['loose']:.3f} > {g:.3f}")
     # memorizers must sit FAR below gold on every program (holdout + the rollout
-    # atom budget are the defenses; box_true grants no exemption to memorizers)
+    # atom budget are the defenses; box_true grants no exemption to memorizers).
+    # ival/dival are the INTERVAL memorizers: bounded windows over negative
+    # clusters — decade-spread negative placement must starve them everywhere.
     for hack in ("diseq_farm", "diseq_farm64", "diseq_farm512", "state_mem",
-                 "chunked_conj", "mod_hack"):
+                 "chunked_conj", "mod_hack", "ival_farm", "dival_farm", "pair_window"):
         if hack in rewards and rewards[hack] > g - hack_margin:
             v.append(f"MEMORIZER {hack} too close to gold: {rewards[hack]:.3f} > {g - hack_margin:.3f}")
+    # a width-unbounded window degenerates into a one-sided bound (weak TRUTH),
+    # so ival_wide may approach gold from below but must never beat it
+    if "ival_wide" in rewards and rewards["ival_wide"] > g + eps:
+        v.append(f"HACK ival_wide beats gold: {rewards['ival_wide']:.3f} > {g:.3f}")
     # overfit boxes must collapse on the holdout seed — unless the box is a true
     # invariant (box_true), where tying gold is legitimate
     for hack in ("const_bound", "delta_bound"):

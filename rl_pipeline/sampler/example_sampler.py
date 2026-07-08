@@ -53,7 +53,7 @@ import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from ..common.program import Program, parse_program
-from ..common.state import State, eval_int, eval_predicate
+from ..common.state import State, eval_predicate
 from . import cexec
 
 # Canonical sampler defaults — the SINGLE source of truth shared by BOTH the
@@ -63,17 +63,25 @@ from . import cexec
 DEFAULT_N_RUNS = 12
 DEFAULT_SEED = 0
 
-# relation dimension: small steps, verifiable against the dense trace window
-_SMALL_DELTAS = (1, -1, 2, -2, 3, -3)
-# bound dimension: large ladder steps, kept only when they escape the sampled range
-_LADDER_DELTAS = (5, -5, 8, -8, 13, -13, 21, -21, 34, -34, 55, -55, 89, -89)
+# relation dimension: small steps, verifiable against the dense trace window.
+# Deliberately SHORT (±1, ±2): d=1 tests the exact boundary of a law, d=2 the
+# first approximation; anything larger adds no discrimination but fattens the
+# near cluster that window-exclusion farms feed on (the relation pool is capped,
+# so near mass directly displaces the anti-window far mass)
+_SMALL_DELTAS = (1, -1, 2, -2)
+# bound dimension: large ladder steps, kept only when they escape the sampled
+# range.  Deliberately SHORT (10 deltas ≤ 34): every ladder escapee lands within
+# ±34 of the range edge — inside any 2-atom window — so the ladder must not
+# outweigh the decade-spread far escapes in _escape_negatives (near:far ≈ 1:1)
+_LADDER_DELTAS = (5, -5, 8, -8, 13, -13, 21, -21, 34, -34)
 _BASE_CAP = 96           # perturbation bases, stratified across all positives
 # Forward trace states required for a "dense" base.  Must be max(|small delta|)+1:
 # the entry state (it=0) and the first head (it=1) carry the SAME valuation (the
-# head prints BEFORE the body runs), so a value-jump of 3 along a unit-step
-# manifold is only witnessed by the state at it+4 — a window of 3 lets frontier
-# perturbations from short runs land on the unsampled next-in-trace state.
-_DENSE_WINDOW = 4
+# head prints BEFORE the body runs), so a value-jump of 2 along a unit-step
+# manifold is only witnessed by the state at it+3 — a shorter window lets
+# frontier perturbations from short runs land on the unsampled next-in-trace
+# state (a mislabel).
+_DENSE_WINDOW = 3
 
 
 @dataclass
@@ -309,404 +317,48 @@ class ExampleSampler:
             scopes.append((cond, arm))
         return scopes
 
-    # ── one assignment scan shared by every conservation rescue ─────────────
-    @classmethod
-    def _frozen_consts(cls, prog: Program, body: str) -> Dict[str, int]:
-        """Variables constant through the loop with a KNOWN literal value:
-        never assigned in the body, literal entry value (`d1 = 1;` pre-loop).
-        Lets `x -= d1` count as a constant self-step."""
-        assigned = cls._assigned_names(body)
-        out: Dict[str, int] = {}
-        for name, expr in prog.local_inits:
-            if name not in assigned and expr and cls._LIT_RE.fullmatch(expr.strip()):
-                out[name] = int(expr.strip())
-        return out
+    # ── seed-hashed placement (the SINGLE source for every negative family) ──
+    #
+    # Negative VALUES must be unpredictable to a policy trained on the fixed
+    # canonical seeds, on two scales:
+    #   * exact position (defeats pointwise `v != k` farms): hash per seed;
+    #   * cluster window (defeats interval farms `!(a <= v && v <= b)`, which
+    #     survive position hashing as long as all offsets stay small): spread
+    #     offsets over decades up to ~1e6 (cube-safe) — no clause budget of
+    #     bounded windows covers every decade on every seed, while a true law
+    #     (`v >= bound`, `x - y == c`) rejects at any distance.
+    # FAR offsets must carry weight comparable to near ones in every family:
+    # near offsets inevitably cluster inside a two-atom window of the boundary
+    # in EVERY derived expression space (v, v+w, v−w, …), so a near-majority
+    # pool hands most of its mass to a narrow window exclusion.
 
-    @classmethod
-    def _var_assignments(cls, body: str,
-                         consts: Optional[Dict[str, int]] = None
-                         ) -> Dict[str, List[Tuple[int, str, Optional[int]]]]:
-        """Every assignment in the body, per variable: (pos, kind, value) with
-        kind 'step' (constant self-step: `v = v ± c`, `v += c`, `v++`, or
-        `v ± f` for a frozen literal-valued f from `consts`), 'lit' (integer
-        literal `v = L`), or 'other' (anything else)."""
-        consts = consts or {}
+    _FAR_DECADES = (100, 300, 1000, 10000, 100000, 300000)
 
-        def step_of(v: str, sign: str, amount: str) -> Optional[int]:
-            if amount.isdigit():
-                mag = int(amount)
-            elif amount in consts:
-                mag = consts[amount]
-            else:
-                return None
-            return mag if sign == "+" else -mag
+    def _hashed(self, salt: int, k: int, lo: int, span: int) -> int:
+        return lo + (self.seed * 31337 + salt * 7919 + k * 104729) % span
 
-        out: Dict[str, List[Tuple[int, str, Optional[int]]]] = {}
-        for m in re.finditer(r"\b(\w+)\s*=\s*([^=;][^;]*);", body):
-            v, rhs = m.group(1), m.group(2).strip()
-            sm = re.fullmatch(rf"{re.escape(v)}\s*([+-])\s*(\w+)", rhs)
-            step = step_of(v, sm.group(1), sm.group(2)) if sm else None
-            if step is not None:
-                out.setdefault(v, []).append((m.start(), "step", step))
-            elif cls._LIT_RE.fullmatch(rhs):
-                out.setdefault(v, []).append((m.start(), "lit", int(rhs)))
-            else:
-                out.setdefault(v, []).append((m.start(), "other", None))
-        for m in re.finditer(r"\b(\w+)\s*([+-])=\s*([^;]+);", body):
-            step = step_of(m.group(1), m.group(2), m.group(3).strip())
-            out.setdefault(m.group(1), []).append(
-                (m.start(), "step", step) if step is not None
-                else (m.start(), "other", None))
-        for m in re.finditer(r"\b(\w+)\s*(\+\+|--)|(\+\+|--)\s*(\w+)\b", body):
-            v = m.group(1) or m.group(4)
-            out.setdefault(v, []).append(
-                (m.start(), "step", 1 if (m.group(2) or m.group(3)) == "++" else -1))
-        for m in re.finditer(r"\b(\w+)\s*([*/%|&^]|<<|>>)=", body):
-            out.setdefault(m.group(1), []).append((m.start(), "other", None))
-        return out
+    def _far_deltas(self, n: int = 6, salt: int = 0) -> List[int]:
+        """`n` far offsets, one per decade (cycling), position hashed per seed."""
+        return [self._hashed(salt, i, d, 2 * d)
+                for i, d in ((i, self._FAR_DECADES[i % len(self._FAR_DECADES)])
+                             for i in range(n))]
 
-    @classmethod
-    def _const_step_sites(cls, prog: Program, loop_idx: int, tainted: Set[str]):
-        """Per TAINTED variable, its {assignment site: net constant step} map —
-        or excluded entirely if ANY of its assignments is not a constant
-        self-step (`v = v ± c`, `v += c`, `v++`).  Sites carry the branch-arm
-        chain (if/else arms are mutually exclusive) plus braceless-if sub-sites,
-        so co-location means "always executed together"."""
-        loop = prog.loops[loop_idx]
-        body = prog.source[loop.body_open + 1: loop.body_close]
-        scopes = cls._branch_scope_ranges(body)
-
-        def scope_chain(pos: int):
-            # if/else ARMS are mutually exclusive: site identity must carry the
-            # arm index, or an if-arm assignment and an else-arm assignment
-            # would look co-located (they never execute together)
-            return tuple((idx, arm)
-                         for idx, (_c, ranges) in enumerate(scopes)
-                         for arm, (s, e) in enumerate(ranges)
-                         if s <= pos < e)
-
-        # braceless `if (cond) stmt; [else {...}]` guards: the guarded statement
-        # belongs to a sub-site UNLESS cond is a textual conjunct of an enclosing
-        # scope condition (then it is redundant and transparent).  The ELSE of a
-        # transparent braceless if is ¬cond — dead under the enclosing condition
-        # but still a distinct site, never transparent.
-        braceless = []
-        for m in re.finditer(r"\bif\s*\(([^()]*)\)\s*(?!\s*\{)", body):
-            stmt_end = body.find(";", m.end())
-            if stmt_end < 0:
-                continue
-            cond = re.sub(r"\s+", " ", m.group(1)).strip()
-            conjuncts = set()
-            for idx, _arm in scope_chain(m.start()):
-                for part in scopes[idx][0].split("&&"):
-                    conjuncts.add(re.sub(r"\s+", " ", part).strip("() "))
-            if cond not in conjuncts:
-                braceless.append((m.end(), stmt_end, ("bl", m.start())))
-            m_else = re.match(r"\s*else\s*\{", body[stmt_end + 1:])
-            if m_else:
-                epos = stmt_end + 1 + m_else.end() - 1
-                depth, k = 1, epos + 1
-                while k < len(body) and depth:
-                    if body[k] == "{":
-                        depth += 1
-                    elif body[k] == "}":
-                        depth -= 1
-                    k += 1
-                braceless.append((epos + 1, k - 1, ("bl-else", m.start())))
-
-        def site_of(pos: int):
-            sub = tuple(tag for s, e, tag in braceless if s <= pos < e)
-            return scope_chain(pos) + sub
-
-        # per var, {site: net step} — excluded if any assignment is not a step
-        out: Dict[str, Dict[tuple, int]] = {}
-        for v, recs in cls._var_assignments(body, cls._frozen_consts(prog, body)).items():
-            if v not in tainted or v not in prog.pre_vars:
-                continue
-            if any(kind != "step" for _pos, kind, _val in recs):
-                continue
-            per: Dict[tuple, int] = {}
-            for pos, _kind, val in recs:
-                site = site_of(pos)
-                per[site] = per.get(site, 0) + val
-            if per:
-                out[v] = per
-        return out
-
-    @classmethod
-    def _rigid_pairs(cls, prog: Program, loop_idx: int, tainted: Set[str]):
-        """Conserved-difference pairs among TAINTED variables: v, w updated only
-        by constant self-steps at exactly the same sites with proportional step
-        vectors conserve `cw·v − cv·w` along EVERY branch sequence.
-        Returns [(v, w, cv, cw)]."""
-        rescuable = cls._const_step_sites(prog, loop_idx, tainted)
-        pairs = []
-        names = sorted(rescuable)
-        for a in range(len(names)):
-            for b in range(a + 1, len(names)):
-                v, w = names[a], names[b]
-                pv, pw = rescuable[v], rescuable[w]
-                if set(pv) != set(pw):
-                    continue
-                sites = sorted(pv)
-                cv, cw = pv[sites[0]], pw[sites[0]]
-                if all(pv[s] * cw == pw[s] * cv for s in sites):
-                    pairs.append((v, w, cv, cw))
-        return pairs
-
-    @classmethod
-    def _lattice_rescues(cls, prog: Program, loop_idx: int, tainted: Set[str]):
-        """gcd-lattice conservation for a single TAINTED variable: if every
-        update of v is a constant self-step and g = gcd(|steps|) > 1, then
-        v ≡ v_entry (mod g) along EVERY branch sequence (e.g.
-        `if(unknown()) i+=6; else i+=3;` conserves i mod 3).  Perturbations off
-        the lattice are unreachable regardless of branching.
-        Returns [(v, g)]."""
-        from math import gcd
-        rescuable = cls._const_step_sites(prog, loop_idx, tainted)
-        out = []
-        for v, per in sorted(rescuable.items()):
-            g = 0
-            for step in per.values():
-                g = gcd(g, abs(step))
-            if g > 1:
-                out.append((v, g))
-        return out
-
-    _LIT_RE = re.compile(r"^-?\d+$")
-
-    @classmethod
-    def _monotone_rescues(cls, prog: Program, loop_idx: int, tainted: Set[str]):
-        """Directional conservation for TAINTED variables: if EVERY assignment
-        to v in the body is a constant self-step or an integer literal, then
-
-          all steps >= 0  ->  v >= min(v_entry, literals)   (floor)
-          all steps <= 0  ->  v <= max(v_entry, literals)   (ceiling)
-
-        along EVERY branch sequence — a value beyond that bound is unreachable
-        no matter which unknown() branches run.  Literal-only variables (state
-        tags like `turn = 0/1/2`) get BOTH directions.  Rescues the whole
-        "counter with reset" family (`if(unknown()) c++; else if(c==n) c=1;`)
-        that taint analysis otherwise leaves signal-free.
-        Returns [(v, direction, literals)] with direction in {+1 floor, -1 ceiling}."""
-        loop = prog.loops[loop_idx]
-        body = prog.source[loop.body_open + 1: loop.body_close]
-        out = []
-        for v, recs in sorted(cls._var_assignments(body, cls._frozen_consts(prog, body)).items()):
-            if v not in tainted or v not in prog.pre_vars:
-                continue
-            if any(kind == "other" for _pos, kind, _val in recs):
-                continue
-            steps = [val for _pos, kind, val in recs if kind == "step"]
-            literals = [val for _pos, kind, val in recs if kind == "lit"]
-            if all(s >= 0 for s in steps):
-                out.append((v, +1, literals))
-            if all(s <= 0 for s in steps):
-                out.append((v, -1, literals))
-        return out
-
-    def _entry_value_fn(self, prog: Program) -> Callable[[State, str], Optional[int]]:
-        """Numeric loop-entry value of a variable for a given state's inputs:
-        params come from `pre`; locals only when their init is an int literal
-        or a direct param copy (anything else -> None, skip the rescue there)."""
-        params = set(prog.params)
-        inits = dict(prog.local_inits)
-
-        def entry_value(s: State, v: str) -> Optional[int]:
-            if v in params:
-                return s.pre.get(v)
-            expr = (inits.get(v) or "").strip()
-            if self._LIT_RE.fullmatch(expr):
-                return int(expr)
-            if expr in params:
-                return s.pre.get(expr)
-            return None
-
-        return entry_value
-
-    def _seed_deltas(self) -> List[int]:
-        """Deltas for bound-law negatives, HASHED FROM THE SEED: these negatives
-        cluster at few values (bound±d), so fixed deltas would let a pointwise
-        `v != k` farm memorize them; with per-seed deltas the holdout's values
-        differ and the farm's min-score collapses while `v >= bound` keeps
-        rejecting everything.  Always includes 1 (the boundary itself)."""
-        ds: List[int] = [1]
-        k = 0
-        while len(ds) < 8 and k < 64:
-            d = 2 + (self.seed * 7919 + k * 104729) % 62
-            if d not in ds:
-                ds.append(d)
-            k += 1
-        return ds
-
-    def _bound_negatives(self, laws, bases: List[State]) -> List[State]:
-        """States on the wrong side of a conserved bound — sound by construction.
-        `laws` = [(v, direction, bound_of)] with direction +1 (v >= bound) or
-        -1 (v <= bound); `bound_of(state)` returns the bound value under that
-        state's inputs, or None when its side conditions fail there."""
-        ds = self._seed_deltas()
+    def _axis_spread(self, bases: List[State], axes_of: Callable[[State], List[str]],
+                     values_of: Callable[[State, str, int], Tuple[int, ...]],
+                     per_base: int = 1) -> List[State]:
+        """The one emitter behind every FAR negative family: for each base and
+        each of `per_base` seed-hashed far offsets, replace one axis's value
+        with `values_of(base, axis, offset)`.  Families differ only in their
+        axis list and value rule (relative to base / range edge)."""
+        far = self._far_deltas()
         out: List[State] = []
-        for v, direction, bound_of in laws:
-            for r in bases:
-                if v not in r.vars:
-                    continue
-                bound = bound_of(r)
-                if bound is None:
-                    continue
-                for d in ds:
-                    nv = dict(r.vars)
-                    nv[v] = bound - d * direction
-                    out.append(State(vars=nv, pre=dict(r.pre)))
-        return out
-
-    def _bound_laws(self, prog: Program, tainted: Set[str]) -> Tuple[List, int, int]:
-        """Compile monotone + guard-derived rescues into uniform bound laws.
-        Returns (laws, n_monotone, n_guarded)."""
-        entry_value = self._entry_value_fn(prog)
-        laws: List = []
-        monotone = self._monotone_rescues(prog, 0, tainted)
-        for v, direction, literals in monotone:
-            def mono_bound(r: State, _v=v, _dir=direction, _lits=literals):
-                ev = entry_value(r, _v)
-                if ev is None:
-                    return None
-                return min([ev] + _lits) if _dir > 0 else max([ev] + _lits)
-            laws.append((v, direction, mono_bound))
-        guarded = self._guarded_bound_rescues(prog, 0, tainted)
-        for v, direction, x_expr, literals in guarded:
-            # ceiling law (direction +1 in rescue terms) means v <= X, i.e.
-            # bound-law direction -1; entry and reset literals must sit on the
-            # sound side of X under this state's inputs
-            def guard_bound(r: State, _v=v, _dir=direction, _x=x_expr, _lits=literals):
-                bound = eval_int(_x, r)
-                ev = entry_value(r, _v)
-                if bound is None or ev is None:
-                    return None
-                if _dir > 0 and (ev > bound or any(lit > bound for lit in _lits)):
-                    return None
-                if _dir < 0 and (ev < bound or any(lit < bound for lit in _lits)):
-                    return None
-                return bound
-            laws.append((v, -direction, guard_bound))
-        return laws, len(monotone), len(guarded)
-
-    @classmethod
-    def _guarded_bound_rescues(cls, prog: Program, loop_idx: int, tainted: Set[str]):
-        """Guard-derived bound for a TAINTED variable: if every UP-step of v is
-        exactly +1 and sits under a guard conjunct `v != X` / `v < X` (or the
-        else-arm of `v == X` / `v >= X`), every literal assignment is <= X, and
-        the entry value is <= X, then `v <= X` holds inductively — unit steps
-        cannot skip over the blocked value.  X must be constant through the
-        loop (no modified/tainted identifiers).  Dual for the floor direction.
-        Rescues `if (c != n) c = c + 1;` counters whose ceiling the bound
-        dimension (disabled under nondet guards) could never witness.
-        Returns [(v, direction, bound_expr, literals)]."""
-        loop = prog.loops[loop_idx]
-        body = prog.source[loop.body_open + 1: loop.body_close]
-        scopes = cls._branch_scope_ranges(body)
-        braceless = []
-        for m in re.finditer(r"\bif\s*\(([^()]*)\)\s*(?!\s*\{)", body):
-            stmt_end = body.find(";", m.end())
-            if stmt_end >= 0:
-                braceless.append((m.group(1), m.end(), stmt_end))
-
-        def norm(t: str) -> str:
-            return re.sub(r"\s+", " ", t).strip("() ")
-
-        def conjuncts_at(pos: int) -> List[Tuple[str, bool, Tuple[int, int]]]:
-            """(conjunct, negated, guarded-range) facts that dominate `pos`."""
-            out: List[Tuple[str, bool, Tuple[int, int]]] = []
-            for cond, ranges in scopes:
-                for arm, (s, e) in enumerate(ranges):
-                    if s <= pos < e:
-                        if arm == 0:
-                            for part in cond.split("&&"):
-                                out.append((norm(part), False, (s, e)))
-                        elif "&&" not in cond and "||" not in cond:
-                            out.append((norm(cond), True, (s, e)))  # else-arm of a single atom
-            for cond, s, e in braceless:
-                if s <= pos < e:
-                    for part in cond.split("&&"):
-                        out.append((norm(part), False, (s, e)))
-            return out
-
-        def bound_from(facts, v: str, up: bool) -> List[Tuple[str, Tuple[int, int]]]:
-            """(bound expression X, guarded-range) pairs justified by the facts."""
-            e = re.escape(v)
-            pats_direct = ([rf"{e} != (.+)", rf"{e} < (.+)", rf"(.+) > {e}"] if up
-                           else [rf"{e} != (.+)", rf"{e} > (.+)", rf"(.+) < {e}"])
-            pats_neg = ([rf"{e} == (.+)", rf"{e} >= (.+)", rf"(.+) <= {e}"] if up
-                        else [rf"{e} == (.+)", rf"{e} <= (.+)", rf"(.+) >= {e}"])
-            found: List[Tuple[str, Tuple[int, int]]] = []
-            for fact, negated, rng in facts:
-                for pat in (pats_neg if negated else pats_direct):
-                    m = re.fullmatch(pat, fact)
-                    if m:
-                        found.append((norm(m.group(1)), rng))
-            return found
-
-        frozen = [v for v in prog.pre_vars
-                  if v not in tainted and v not in cls._assigned_names(body)]
-        out = []
-        for v, recs in sorted(cls._var_assignments(body, cls._frozen_consts(prog, body)).items()):
-            if v not in tainted or v not in prog.pre_vars:
-                continue
-            if any(kind == "other" for _pos, kind, _val in recs):
-                continue
-            sites = [(pos, val) for pos, kind, val in recs if kind == "step"]
-            literals = [val for _pos, kind, val in recs if kind == "lit"]
-            if not sites:
-                continue
-            all_v_positions = [pos for pos, _k, _v2 in recs]
-            for direction in (+1, -1):
-                moving = [(p, s) for p, s in sites if s * direction > 0]
-                if len(moving) != 1 or abs(moving[0][1]) != 1:
-                    # several moving sites can fire in one pass (the guard fact
-                    # goes stale between them), and non-unit steps skip the block
-                    continue
-                pos = moving[0][0]
-                for x, (s, _e2) in bound_from(conjuncts_at(pos), v, direction > 0):
-                    # the guard fact must still hold when the step runs: no other
-                    # assignment to v between the guard's scope start and the step
-                    if any(s <= q < pos for q in all_v_positions if q != pos):
-                        continue
-                    # X must be frozen during the loop: identifiers all unmodified
-                    ids = set(re.findall(r"[A-Za-z_]\w*", x))
-                    if ids and ids <= set(frozen):
-                        out.append((v, direction, x, literals))
-                        break
-        return out
-
-    def _rigid_pair_negatives(self, pairs, bases: List[State]) -> List[State]:
-        """Perturbations off a conserved line `cw·v − cv·w == const` — sound by
-        construction, no density/novelty requirement needed."""
-        out: List[State] = []
-        for v, w, cv, cw in pairs:
-            for r in bases:
-                base = r.vars
-                if v not in base or w not in base:
-                    continue
-                for d in _SMALL_DELTAS:
-                    for dv, dw in ((d, 0), (0, d), (d, -d), (d, d)):
-                        if cw * dv - cv * dw == 0:
-                            continue          # on the conserved line
-                        nv = dict(base); nv[v] += dv; nv[w] += dw
+        for i, r in enumerate(bases):
+            for j in range(per_base):
+                f = far[(i * per_base + j) % len(far)] + i * per_base + j
+                for v in axes_of(r):
+                    for val in values_of(r, v, f):
+                        nv = dict(r.vars); nv[v] = val
                         out.append(State(vars=nv, pre=dict(r.pre)))
-        return out
-
-    def _lattice_negatives(self, rescues, bases: List[State]) -> List[State]:
-        """Perturbations off a conserved lattice `v ≡ v_entry (mod g)` — sound by
-        construction (the base is reachable, so it sits on the lattice; any
-        off-lattice step is unreachable under every branch sequence)."""
-        out: List[State] = []
-        for v, g in rescues:
-            deltas = [d for d in (1, -1, 2, -2, 4, -4, 5, -5, 7, -7) if d % g != 0][:8]
-            for r in bases:
-                if v not in r.vars:
-                    continue
-                for d in deltas:
-                    nv = dict(r.vars); nv[v] += d
-                    out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
     @staticmethod
@@ -799,7 +451,7 @@ class ExampleSampler:
             for i in range(len(movable)):
                 for j in range(i + 1, len(movable)):
                     u, w = movable[i], movable[j]
-                    for d in (1, -1, 2, -2, 3, -3):
+                    for d in _SMALL_DELTAS:
                         for su, sw in ((d, d), (d, -d)):
                             if not (novel(u, base[u] + su) or novel(w, base[w] + sw)):
                                 continue
@@ -807,26 +459,97 @@ class ExampleSampler:
                             out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
+    @staticmethod
+    def _complete_runs(raw_reach: List[State]) -> Set[int]:
+        """Runs whose observed states are the COMPLETE reachable set for their
+        input (only meaningful for deterministic programs): the run either
+        exited within the dense print prefix (every state printed), or a state
+        REPEATED inside the prefix — the orbit is closed, so the observed
+        prefix is the whole reachable set even on capped non-terminating runs."""
+        per_run: Dict[int, List[State]] = {}
+        for s in raw_reach:
+            if s.run >= 0:
+                per_run.setdefault(s.run, []).append(s)
+        ok: Set[int] = set()
+        for run, states in per_run.items():
+            if max(s.it for s in states) < cexec._PRINT_DENSE:
+                ok.add(run)                             # exited, fully printed
+                continue
+            seen_keys: set = set()
+            for s in sorted(states, key=lambda t: t.it):
+                if s.it >= cexec._PRINT_DENSE:
+                    break
+                k = s.vars_key()
+                if k in seen_keys:
+                    ok.add(run)                         # closed orbit
+                    break
+                seen_keys.add(k)
+        return ok
+
+    def _far_relation_negatives(self, movable: List[str], bases: List[State]) -> List[State]:
+        """FAR single-axis perturbations, only for bases of COMPLETE runs (see
+        _complete_runs): there the observed states are the whole reachable set
+        for that input, so an unobserved valuation is unreachable at ANY
+        distance — no density window needed.  Spreads the relation dimension,
+        whose small deltas cluster within ±3 of the manifold in every
+        conserved-expression space (x−y, x+y, …)."""
+        # at least 2 offsets per base (more on small pools), so the far band
+        # carries weight against the near cluster in every expression space
+        per_base = max(2, 64 // max(1, len(bases)))
+        return self._axis_spread(bases, lambda r: movable,
+                                 lambda r, v, f: (r.vars[v] + f, r.vars[v] - f),
+                                 per_base=per_base)
+
     def _escape_negatives(self, movable: List[str], bases: List[State],
-                          positives: List[State]) -> List[State]:
-        """Large ladder steps kept only when they leave the variable's sampled
+                          positives: List[State],
+                          run_ranges: Optional[Dict[int, Dict[str, Tuple[int, int]]]] = None
+                          ) -> List[State]:
+        """Ladder + far steps kept only when they leave the variable's sampled
         range.  Since full traces are collected up to the genuine exit, the
         sampled range equals the true reachable range, so escapees are truly
-        unreachable.  The many distinct escaped values (one ladder per base)
-        make pointwise `v != k` farms uneconomical."""
+        unreachable — at ANY distance.  The near ladder gives many distinct
+        escaped values (defeats pointwise `v != k` farms); the far offsets
+        spread escapees over decades (defeats bounded-window interval farms).
+
+        Escapes anchor at the base's own RUN range when that run is complete
+        (`run_ranges`), else at the global range, and far escapes for complete
+        runs land INSIDE the gap between the run's range and the global range.
+        The gap placement wins on both fronts at once:
+          * it starves input-envelope boxes — an escape at x = run_hi(n=5)+f
+            sits inside the global envelope, so `x <= global_max` cannot
+            reject it while the true input-relative bound `x <= n` can;
+          * it is farm-immune for free — gap values are positive-observed
+            under OTHER inputs, so any single-var window/diseq covering them
+            is unsound on the sample and dies in the exact filter.
+        Runs sitting at the global edge (no gap) fall back to beyond-global
+        decade offsets."""
         lo = {v: min(p.vars[v] for p in positives) for v in movable}
         hi = {v: max(p.vars[v] for p in positives) for v in movable}
+        run_ranges = run_ranges or {}
+
+        def bounds(r: State, v: str) -> Tuple[int, int]:
+            rr = run_ranges.get(r.run, {}).get(v)
+            return rr if rr is not None else (lo[v], hi[v])
+
         out: List[State] = []
         for r in bases:
             base = r.vars
             for v in movable:
+                b_lo, b_hi = bounds(r, v)
                 for d in _LADDER_DELTAS:
                     nv_val = base[v] + d
-                    if lo[v] <= nv_val <= hi[v]:
+                    if b_lo <= nv_val <= b_hi:
                         continue
                     nv = dict(base); nv[v] = nv_val
                     out.append(State(vars=nv, pre=dict(r.pre)))
-        return out
+
+        def far_vals(r: State, v: str, f: int) -> Tuple[int, int]:
+            r_lo, r_hi = bounds(r, v)
+            up = r_hi + 1 + (f % (hi[v] - r_hi)) if r_hi < hi[v] else hi[v] + f
+            dn = r_lo - 1 - (f % (r_lo - lo[v])) if r_lo > lo[v] else lo[v] - f
+            return (up, dn)
+
+        return out + self._axis_spread(bases, lambda r: movable, far_vals, per_base=2)
 
     # Hundreds of negatives sharing one off-manifold coordinate value are
     # redundant evidence AND a fat target: one `v != k` clause kills the whole
@@ -895,7 +618,7 @@ class ExampleSampler:
         nondet = (self._guard_nondeterministic(prog, 0)
                   or any(re.search(rf"\b{re.escape(t)}\b", guard) for t in tainted))
         dense_index = {(s.run, s.it) for s in raw_reach if s.run >= 0}
-        bases = self._bases(positives)                     # escape / rigid / lattice
+        bases = self._bases(positives)                     # escape / far-relation
         dense_bases = self._bases(positives, dense_index)  # relation (needs the window)
         # branch-dependent (nondet-tainted) variables have envelope-valued
         # reachable sets a finite sample cannot cover — never perturb them
@@ -924,25 +647,37 @@ class ExampleSampler:
                 bound_groups.append(idxs)
             n_over_traces = len(by_run)
             if not capped and positives:
+                # per-run ranges for COMPLETE runs of deterministic programs:
+                # escapes anchored at the run's OWN range are still provably
+                # unreachable for that run's inputs, but only an INPUT-RELATIVE
+                # bound (x <= n) rejects them — an input-envelope box
+                # (x <= global_max) does not, so boxes starve (see
+                # _escape_negatives)
+                run_ranges: Dict[int, Dict[str, Tuple[int, int]]] = {}
+                if not re.search(r"\bunknown\w*\s*\(", prog.source):
+                    complete = self._complete_runs(raw_reach)
+                    for p in positives:
+                        if p.run in complete:
+                            rr = run_ranges.setdefault(p.run, {})
+                            for v in movable:
+                                if v in p.vars:
+                                    lo_hi = rr.get(v)
+                                    val = p.vars[v]
+                                    rr[v] = ((val, val) if lo_hi is None else
+                                             (min(lo_hi[0], val), max(lo_hi[1], val)))
                 escapes = self._slice_diverse(
-                    keep(self._escape_negatives(movable, bases, positives)), positives,
-                    counts=slice_counts)
+                    keep(self._escape_negatives(movable, bases, positives, run_ranges)),
+                    positives, counts=slice_counts)
                 for s in escapes:
                     bound_groups.append([len(bound)])
                     bound.append(s)
                     n_escape += 1
 
         relation_candidates = self._relation_negatives(movable, dense_bases, dense_index, novel_only)
-        rigid = self._rigid_pairs(prog, 0, tainted) if tainted else []
-        if rigid:
-            relation_candidates = relation_candidates + self._rigid_pair_negatives(rigid, bases)
-        lattice = self._lattice_rescues(prog, 0, tainted) if tainted else []
-        if lattice:
-            relation_candidates = relation_candidates + self._lattice_negatives(lattice, bases)
-        bound_laws, n_monotone, n_guarded = (self._bound_laws(prog, tainted)
-                                             if tainted else ([], 0, 0))
-        if bound_laws:
-            relation_candidates = relation_candidates + self._bound_negatives(bound_laws, bases)
+        if not re.search(r"\bunknown\w*\s*\(", prog.source):
+            far_bases = [b for b in bases if b.run in self._complete_runs(raw_reach)]
+            relation_candidates = relation_candidates + self._far_relation_negatives(
+                movable, far_bases)
         relation = self._slice_diverse(keep(relation_candidates), positives,
                                        counts=slice_counts)
         # balance in TRACE units: each relation state is one impossible history
@@ -962,10 +697,6 @@ class ExampleSampler:
             "bound_escape": n_escape,
             "capped": capped,
             "nondet_guard": nondet,
-            "rigid_pairs": len(rigid),
-            "lattice_rescues": len(lattice),
-            "monotone_rescues": n_monotone,
-            "guarded_rescues": n_guarded,
             # legacy keys (older dashboards):
             "frontier": len(relation),
             "overrun": n_over_traces,
