@@ -3,6 +3,7 @@
 %% ============================================================
 \begin{figure}[t]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   font=\scriptsize,
   box/.style={draw, rounded corners=2pt, align=center, inner sep=3pt},
@@ -20,8 +21,8 @@
     requires n >= 0;\\
     x = 0; y = n;\\
     while (y > 0)\\
-    \{ x++; y--; \}\\
-    \textcolor{codered}{\sout{assert x == n;}}
+    x++; y--;\\
+    \textcolor{codered}{assert x == n;}
   };
 \node[lbl, anchor=west] at ($(prog.south west)+(0,-0.22)$) {postcondition \textcolor{codered}{stripped}};
 \node[stage, anchor=north] (pol) at ($(prog.south)+(0,-0.65)$) {policy $\pi_\theta$};
@@ -32,7 +33,7 @@
 \draw[arr] (pol) -- (summ);
 
 %% ---------------- panel (b): sampler ----------------
-\node[anchor=north west] (btitle) at (4.9,5.6) {\textbf{(b) Sampler: positives + truthful negatives}};
+\node[anchor=north west] (btitle) at (4.9,5.6) {\textbf{(b) Sampler: positives + candidate negatives}};
 \begin{scope}[shift={(5.7,1.55)}]
   % axes
   \draw[->, black!50] (0,0) -- (4.35,0) node[right, lbl] {$x$};
@@ -54,8 +55,8 @@
   % escape: push one variable out of range, dotted displacement arrow
   \draw[densely dotted, codered!70, -{Stealth[length=1.4mm]}] (1.15,1.4) -- (3.75,1.4);
   \node[text=codered] at (3.87,1.4) {$\blacktriangle$};
-  \node[lbl, text=codered, anchor=east] at (4.25,1.72) {escape: out of range,};
-  \node[lbl, text=codered, anchor=east] at (4.25,1.02) {far, seed-hashed};
+  \node[lbl, text=codered, anchor=east] at (4.25,1.72) {escape: outside};
+  \node[lbl, text=codered, anchor=east] at (4.25,1.02) {sampled range};
   % over-run continuation: on the manifold, past the exit
   \foreach \i in {8,9} {
     \draw[codered, thick] ({0.35*\i-0.06},{2.45-0.35*\i-0.06}) rectangle ({0.35*\i+0.06},{2.45-0.35*\i+0.06});
@@ -65,32 +66,31 @@
 % filter strip
 \node[neg, anchor=north west] (f1) at (5.35,0.28) {reachable?};
 \node[neg, anchor=west] (f2) at ($(f1.east)+(0.18,0)$) {entry-feasible?};
-\node[neg, anchor=west] (f3) at ($(f2.east)+(0.18,0)$) {tainted?};
+\node[neg, anchor=west] (f3) at ($(f2.east)+(0.18,0)$) {oracle?};
 \node[lbl, anchor=west] at ($(f3.east)+(0.15,0)$) {$\Rightarrow$ veto};
-\node[lbl, anchor=north west] at (5.35,-0.25) {trace units: one impossible history $=$ one unit};
+\node[lbl, anchor=north west] at (5.35,-0.25) {trace units: one synthetic history $=$ one unit};
 
 %% ---------------- panel (c): reward ----------------
-\node[anchor=north west] (ctitle) at (10.9,5.6) {\textbf{(c) Hack-resistant dense reward}};
+\node[anchor=north west] (ctitle) at (10.9,5.6) {\textbf{(c) Minimal dense reward}};
 \node[box, anchor=north west, font=\ttfamily\tiny, align=left] (roll) at (10.9,5.1)
   {rollout $A$: clause set};
 \node[stage, anchor=north west, align=left] (casc) at ($(roll.south west)+(0,-0.3)$)
-  {complexity gate $\to$ scope\\ $\to$ positive soundness\\ $\to$ Houdini induction};
+  {positive filter $\to$ syntax\\ $\to$ Frama-C/WP Houdini};
 \node[lbl, anchor=west] at ($(casc.east)+(0.1,0.25)$) {$\mathrm{surv}(A)$};
 \node[box, anchor=north west, fill=white] (score) at ($(casc.south west)+(0,-0.35)$)
-  {$r = \max(0,\, \tfrac12\,\mathrm{base} + \tfrac12\,\mathrm{marg} - \tfrac1{20}\,\mathrm{junk})$};
-\node[chip, anchor=north west] (s0) at ($(score.south west)+(0.05,-0.3)$) {seed 0};
-\node[chip, anchor=west] (s1) at ($(s0.east)+(0.12,0)$) {seed 1};
-\node[chip, anchor=west, draw=codered!60, fill=codered!6] (sh) at ($(s1.east)+(0.12,0)$) {holdout};
-\node[box, anchor=west, fill=codegreen!8, draw=codegreen!60] (min) at ($(sh.east)+(0.25,0)$) {$\min$};
+  {$r = \tfrac12\,\mathrm{base} + \tfrac12\,\mathrm{marginal}$};
+\node[chip, anchor=north west] (s0) at ($(score.south west)+(0.05,-0.3)$) {base: $A$ alone};
+\node[chip, anchor=west] (s1) at ($(s0.east)+(0.12,0)$) {marginal: union ablation};
 \draw[arr] (roll) -- (casc);
 \draw[arr] (casc) -- (score);
 \draw[arr] ($(score.south)+(0,-0.05)$) -- ($(score.south)+(0,-0.28)$);
-\draw[arr] (min.east) -- ++(0.35,0) node[anchor=west, lbl, align=left] {GRPO\\ update};
+\draw[arr] (s1.east) -- ++(0.35,0) node[anchor=west, lbl, align=left] {RL\\ update};
 \end{tikzpicture}
+}%
 \caption{\textbf{\sam{} overview.}
-(a)~The policy sees only precondition, guard, and body---the postcondition is stripped---and must emit the \emph{strongest} inductive loop summary, not an invariant tailored to a given target.
-(b)~The sampler executes the instrumented loop over a deterministic, precondition-respecting input sweep; positives are observed loop-head states, and negatives are \emph{truthful impossible traces} in two dimensions: relational perturbations off densely sampled trace windows, and bound violations (over-run continuations past a genuine exit, and seed-hashed range escapes).
-Three vetoes (reachability, entry feasibility, nondeterminism taint) guarantee every emitted negative is unreachable under its input.
-(c)~Each rollout is reduced to its surviving inductive core, scored by the fraction of impossible traces it rejects (plus ablation-based marginal credit and a junk discount), and \emph{minimized} across canonical and held-out sampling seeds, so memorizing any finite sample earns nothing.}
+(a)~The policy sees precondition, guard, and body; any assertion present is stripped in closed-book mode, and the policy must emit the \emph{strongest} inductive loop summary rather than an invariant tailored to a target.
+(b)~The sampler executes the instrumented loop over a deterministic, precondition-respecting input sweep; positives are observed loop-head states, and negative candidates come from relational perturbations around dense trace windows, over-run continuations past a genuine exit, and sampled-range escapes.
+Reachability and entry-feasibility guards remove contradicted labels; incomplete state/control coverage disables synthetic negatives, and a broader-run audit checks for pair-level collisions.
+(c)~Each rollout is reduced to its surviving inductive core and receives the equal-weighted sum of its standalone rejection rate and its ablation-based marginal contribution; this is the complete scoring formula.}
 \label{fig:overview}
 \end{figure}

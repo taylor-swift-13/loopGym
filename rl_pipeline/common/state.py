@@ -19,8 +19,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-_CLAMP = (1 << 31) - 1
-
 
 @dataclass(frozen=True)
 class State:
@@ -43,7 +41,11 @@ class State:
         return hash(self.key())
 
     def render(self) -> str:
-        return " && ".join(f"{k} == {v}" for k, v in sorted(self.vars.items()))
+        current = " && ".join(f"{k} == {v}" for k, v in sorted(self.vars.items()))
+        if not self.pre:
+            return current
+        initial = " && ".join(f"{k} == {v}" for k, v in sorted(self.pre.items()))
+        return f"{current}; Pre: {initial}"
 
 
 _INV_RE = re.compile(r"loop\s+invariant\s+([^;]+);")
@@ -58,7 +60,7 @@ def normalize_invariant(inv: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def extract_invariants(text: str):
+def extract_invariants(text: str) -> List[str]:
     """Pull `loop invariant <expr>;` texts (whitespace-normalized) out of annotated
     code or raw LLM output.  Canonical parser shared by reward/inference."""
     if not text:
@@ -97,31 +99,79 @@ def _split_top_level(expr: str, sep: str) -> List[str]:
     return parts
 
 
+def _has_outer_parens(expr: str) -> bool:
+    if len(expr) < 2 or expr[0] != "(" or expr[-1] != ")":
+        return False
+    depth = 0
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0 and index != len(expr) - 1:
+                return False
+    return depth == 0
+
+
+def _translate_logic(expr: str) -> str:
+    """Recursively translate ACSL boolean operators with their precedence."""
+    s = expr.strip()
+    if _has_outer_parens(s):
+        return f"({_translate_logic(s[1:-1])})"
+
+    for operator, python_operator in (("<==>", None), ("==>", None),
+                                      ("||", "or"), ("&&", "and")):
+        parts = _split_top_level(s, operator)
+        if len(parts) == 1:
+            continue
+        if operator == "<==>":
+            translated = [_translate_logic(part) for part in parts]
+            result = translated[0]
+            for part in translated[1:]:
+                result = f"(bool({result}) == bool({part}))"
+            return result
+        if operator == "==>":
+            result = _translate_logic(parts[-1])
+            for part in reversed(parts[:-1]):
+                result = f"((not ({_translate_logic(part)})) or ({result}))"
+            return result
+        return f" {python_operator} ".join(
+            f"({_translate_logic(part)})" for part in parts
+        )
+
+    if s.startswith("!") and not s.startswith("!="):
+        return f"(not ({_translate_logic(s[1:])}))"
+
+    # Translate boolean expressions nested inside otherwise atomic parentheses.
+    out, index = [], 0
+    while index < len(s):
+        if s[index] != "(":
+            out.append(s[index])
+            index += 1
+            continue
+        depth, end = 1, index + 1
+        while end < len(s) and depth:
+            if s[end] == "(":
+                depth += 1
+            elif s[end] == ")":
+                depth -= 1
+            end += 1
+        if depth:
+            return s
+        out.append("(" + _translate_logic(s[index + 1:end - 1]) + ")")
+        index = end
+    return "".join(out)
+
+
 def _acsl_to_py(expr: str) -> str:
     """Convert an ACSL boolean expression to a Python expression string."""
-    s = expr
-    # \at(v, Pre) and v@pre -> safe identifier
+    s = re.sub(r"\\true\b", "True", expr)
+    s = re.sub(r"\\false\b", "False", s)
     s = re.sub(r"\\at\(\s*(\w+)\s*,\s*Pre\s*\)", r"\1__PRE__", s)
     s = re.sub(r"\b(\w+)@pre\b", r"\1__PRE__", s)
-    # implication (right associative): fold on top-level ==>
-    if "==>" in s:
-        parts = _split_top_level(s, "==>")
-        if len(parts) >= 2:
-            acc = _acsl_to_py(parts[-1])
-            for left in reversed(parts[:-1]):
-                acc = f"((not ({_acsl_to_py(left)})) or ({acc}))"
-            return acc
-    # equivalence
-    if "<==>" in s:
-        parts = _split_top_level(s, "<==>")
-        if len(parts) == 2:
-            return f"(bool({_acsl_to_py(parts[0])}) == bool({_acsl_to_py(parts[1])}))"
-    s = s.replace("&&", " and ").replace("||", " or ")
-    s = re.sub(r"!(?!=)", " not ", s)          # logical not, but keep !=
-    s = re.sub(r"(?<![<>=!])=(?![=])", "==", s)  # lone '=' -> '==' (defensive)
-    # C integer division / modulo -> python floor ops
-    s = re.sub(r"(?<![/])/(?![/])", "//", s)
-    return s
+    s = _translate_logic(s)
+    s = re.sub(r"(?<![<>=!])=(?![=])", "==", s)
+    return re.sub(r"(?<![/])/(?![/])", "//", s)
 
 
 # C integer division/modulo: truncation toward zero (Python's // and % floor).
@@ -153,8 +203,62 @@ class _CDivTransformer(ast.NodeTransformer):
         )
 
 
+class _VectorTransformer(ast.NodeTransformer):
+    """Make Python boolean AST nodes work element-wise on NumPy arrays."""
+
+    @staticmethod
+    def _fold(name: str, values):
+        result = values[0]
+        for value in values[1:]:
+            result = ast.Call(
+                func=ast.Name(id=name, ctx=ast.Load()),
+                args=[result, value],
+                keywords=[],
+            )
+        return result
+
+    def visit_BoolOp(self, node):
+        values = [self.visit(value) for value in node.values]
+        name = "__logical_and__" if isinstance(node.op, ast.And) else "__logical_or__"
+        return ast.copy_location(self._fold(name, values), node)
+
+    def visit_UnaryOp(self, node):
+        operand = self.visit(node.operand)
+        if isinstance(node.op, ast.Not):
+            return ast.copy_location(
+                ast.Call(
+                    func=ast.Name(id="__logical_not__", ctx=ast.Load()),
+                    args=[operand],
+                    keywords=[],
+                ),
+                node,
+            )
+        node.operand = operand
+        return node
+
+    def visit_Compare(self, node):
+        left = self.visit(node.left)
+        comparators = [self.visit(value) for value in node.comparators]
+        comparisons = []
+        current = left
+        for operator, right in zip(node.ops, comparators):
+            comparisons.append(ast.Compare(left=current, ops=[operator], comparators=[right]))
+            current = right
+        result = comparisons[0]
+        if len(comparisons) > 1:
+            result = self._fold("__logical_and__", comparisons)
+        return ast.copy_location(result, node)
+
+    def visit_Call(self, node):
+        node = self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id == "bool" and len(node.args) == 1:
+            return ast.copy_location(node.args[0], node)
+        return node
+
+
 # Cache compiled expressions across calls (predicates evaluated on many states).
 _COMPILE_CACHE: Dict[str, object] = {}
+_VECTOR_COMPILE_CACHE: Dict[str, object] = {}
 _SAFE_GLOBALS = {"__builtins__": {}}
 
 
@@ -172,6 +276,19 @@ def _compile(expr: str):
     return code
 
 
+def _compile_vector(expr: str):
+    py = _acsl_to_py(expr).strip()
+    code = _VECTOR_COMPILE_CACHE.get(py)
+    if code is None:
+        tree = ast.parse(py, mode="eval")
+        tree = _CDivTransformer().visit(tree)
+        tree = _VectorTransformer().visit(tree)
+        ast.fix_missing_locations(tree)
+        code = compile(tree, "<acsl-vector>", "eval")
+        _VECTOR_COMPILE_CACHE[py] = code
+    return code
+
+
 def eval_predicate(expr: str, state: "State") -> Optional[bool]:
     """
     Evaluate an ACSL boolean predicate at `state`.
@@ -186,7 +303,7 @@ def eval_predicate(expr: str, state: "State") -> Optional[bool]:
         return None
     try:
         code = _compile(expr)
-    except SyntaxError:
+    except (SyntaxError, TypeError, ValueError):
         return None
     ns: Dict[str, int] = {}
     for k, v in state.vars.items():
@@ -216,4 +333,74 @@ def eval_predicate(expr: str, state: "State") -> Optional[bool]:
     try:
         return bool(result)
     except Exception:
+        return None
+
+
+def first_falsifying_state(expr: str, states: List[State]) -> Optional[State]:
+    """Return the first sampled state falsifying ``expr``.
+
+    NumPy evaluates the same predicate over every state column at once.  The
+    scalar fallback stops on an unevaluable expression, leaving syntax and
+    induction decisions to Frama-C rather than spending time rescanning a
+    predicate the lite evaluator cannot ground.
+    """
+    if not states:
+        return None
+    try:
+        import numpy as np
+
+        code = _compile_vector(expr)
+        function_names = {
+            "abs", "__cdiv__", "__cmod__", "__logical_and__",
+            "__logical_or__", "__logical_not__",
+        }
+        columns = {}
+        for name in code.co_names:
+            if name in function_names:
+                continue
+            if name.endswith("__PRE__"):
+                key = name[:-7]
+                if any(key not in state.pre for state in states):
+                    return None
+                columns[name] = np.fromiter(
+                    (state.pre[key] for state in states), dtype=object, count=len(states)
+                )
+            else:
+                if any(name not in state.vars for state in states):
+                    return None
+                columns[name] = np.fromiter(
+                    (state.vars[name] for state in states), dtype=object, count=len(states)
+                )
+
+        def cdiv(left, right):
+            left, right = np.asarray(left), np.asarray(right)
+            if np.any(right == 0):
+                raise ZeroDivisionError
+            quotient = np.floor_divide(np.abs(left), np.abs(right))
+            return np.where((left >= 0) == (right >= 0), quotient, -quotient)
+
+        def cmod(left, right):
+            return np.asarray(left) - cdiv(left, right) * np.asarray(right)
+
+        namespace = {
+            **columns,
+            "abs": np.abs,
+            "__cdiv__": cdiv,
+            "__cmod__": cmod,
+            "__logical_and__": np.logical_and,
+            "__logical_or__": np.logical_or,
+            "__logical_not__": np.logical_not,
+        }
+        result = np.asarray(eval(code, _SAFE_GLOBALS, namespace), dtype=bool)
+        if result.ndim == 0:
+            return None if bool(result) else states[0]
+        false_indices = np.flatnonzero(~result)
+        return states[int(false_indices[0])] if false_indices.size else None
+    except Exception:
+        for state in states:
+            result = eval_predicate(expr, state)
+            if result is False:
+                return state
+            if result is None:
+                return None
         return None

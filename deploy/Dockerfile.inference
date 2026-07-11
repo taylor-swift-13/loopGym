@@ -1,11 +1,11 @@
 # LoopGym — Inference image (testing): vLLM + Frama-C, self-contained.
 #
 # Deploys a TRAINED model to an in-process vLLM engine and runs inference over a
-# set of C programs:  sample → generate (vLLM) → positive-filter → combine →
-# Houdini → Frama-C/WP verify.  Shares the SAME sampler as the reward image.
+# set of C programs: generate (vLLM) → optional refine → combine → Houdini →
+# Frama-C/WP verify. Inference does not run the reward sampler.
 #
-# gcc (sampler) + frama-c + z3 + why3 are bundled, so a GPU host needs NO local
-# frama-c.  Based on the official vLLM image (CUDA + vLLM already present).
+# Frama-C + z3 + why3 are bundled, so a GPU host needs no local Frama-C.
+# Based on the official vLLM image (CUDA + vLLM already present).
 #
 # Build (context = repo root):
 #   docker build -f deploy/Dockerfile.inference -t loopgym-inference .
@@ -17,33 +17,36 @@ FROM vllm/vllm-openai:latest
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
-# --- gcc (sampler) + Frama-C/WP + z3 + why3 (real Houdini) ---
+# --- Frama-C/WP + z3 + why3 (real Houdini) ---
 # The vLLM image is Ubuntu-based; these live in Ubuntu universe.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc libc6-dev frama-c z3 why3 \
+ && apt-get install -y --no-install-recommends frama-c z3 why3 \
  && rm -rf /var/lib/apt/lists/* \
  && ( why3 config detect || why3 config --detect ) \
- && gcc --version && frama-c -version && z3 --version
+ && frama-c -version && z3 --version
 
 WORKDIR /app
 
-# --- full rl_pipeline (inference reuses reward.filters for Houdini + sampler) ---
-COPY rl_pipeline/ /app/rl_pipeline/
+# --- inference plus shared parser/prompts and Frama-C adapter modules ---
+COPY rl_pipeline/__init__.py /app/rl_pipeline/__init__.py
+COPY rl_pipeline/common/ /app/rl_pipeline/common/
+COPY rl_pipeline/inference/ /app/rl_pipeline/inference/
+COPY rl_pipeline/reward/__init__.py rl_pipeline/reward/annotate.py \
+     rl_pipeline/reward/filters.py /app/rl_pipeline/reward/
 
 # --- src modules the HoudiniFilter / verifier reuse ---
-COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
-     src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
+COPY src/__init__.py src/config.py src/houdini_pruner.py \
+     src/output_verify.py src/syntax_checker.py /app/src/
 # --- prompts (single source of truth: generate/refine/system) ---
 COPY prompt/ /app/prompt/
 
-# Build-time check: gcc sampling works and the real-Houdini cascade is wired.
-RUN python3 -c "import sys; sys.path.insert(0,'src'); \
+# Build-time check: inference stays sampler-free and real Houdini is wired.
+RUN python3 -c "import sys; \
 from rl_pipeline.reward import filters as F; \
 assert F.frama_c_available() and F.auto_filter().name.startswith('cascade'), 'frama-c/cascade not wired'; \
-from rl_pipeline.sampler import ExampleSampler; \
-src='/*@ requires n>=0; */ void f(int n){int x=n,y=0; while(x>0){x--;y++;}}'; \
-assert len(ExampleSampler(src).sample().pos(0))>0, 'gcc sampling produced no positives'; \
-print('build OK: gcc-sampling + frama-c cascade + vllm base ready')"
+import rl_pipeline.inference; \
+assert 'rl_pipeline.sampler' not in sys.modules, 'inference imported sampler'; \
+print('build OK: independent inference + frama-c cascade + vllm base ready')"
 
 # override the vLLM image's OpenAI-server entrypoint: run our inference CLI.
 # args (--model / --inputs / ...) are appended at `docker run`.

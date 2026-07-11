@@ -29,33 +29,31 @@ The summary task subsumes the target-directed one: any $Q$ provable from \emph{s
 It is also strictly harder to game.
 In the target-directed task, $Q$ itself (weakened to pass initiation) is often an acceptable answer; in the summary task there is no $Q$ to parrot, and weak answers---$\mathit{true}$, the guard, loose boxes---are exactly what the reward of $\S$\ref{sec:method} is designed to score low.
 
-In practice a summary is a \emph{set} of ACSL clauses
-$\texttt{loop invariant } e_1; \dots; \texttt{loop invariant } e_k;$
-whose conjunction is the invariant; typical summaries pair one or two relational laws (e.g.\ $x = y \cdot z$ preserved by the body) with progress bounds (e.g.\ $0 \le i \le n$).
-Soundness is never entrusted to the learner: every clause set is reduced to its greatest inductive subset by Houdini pruning~\citep{flanagan2001houdini} over Frama-C/WP~\citep{framac} before it is scored or reported, so the system's output is certified by construction.
+In practice a summary is a set of ACSL \texttt{loop invariant} clauses whose conjunction is the invariant.  Typical summaries pair one or two relational laws (e.g.\ $x = y \cdot z$ preserved by the body) with progress bounds (e.g.\ $0 \le i \le n$).
+Soundness is never entrusted to the learner in production: every clause set is reduced to its greatest inductive subset by Houdini pruning~\citep{flanagan2001houdini} over Frama-C/WP~\citep{framac} before it is scored or reported.  A native installation without Frama-C can fall back to the positive filter for development, but that path is not a proof certificate; both deployment images bundle the prover.
 
 \subsection{System Overview}
 \label{sec:overview:system}
 
-\sam{} decomposes into three components that share a common core (a lightweight C/ACSL program model and a safe ACSL predicate evaluator) but are independently deployable:
+\sam{} decomposes into three operationally independent components.  Training calls the reward service, while deployment evaluation runs inference; neither invokes the other:
 
 \begin{stepbox}[1. Example sampler (\S\ref{sec:method:sampler})]
-Compiles and executes the instrumented loop over a deterministic, precondition-respecting input sweep; emits \emph{positive} loop-head states (real trace states) and \emph{truthful negative} trace units (provably impossible histories) along a relational and a bound dimension.
+Compiles and executes the instrumented loop over a deterministic, precondition-respecting input sweep; emits sampled positive loop-head states and three families of synthetic negative-candidate trace units: relational perturbations, genuine-exit over-runs, and sampled-range escapes.
 The sampler sees only $(\phi_{\mathrm{pre}}, B, S)$---never the postcondition.
 \end{stepbox}
 
 \begin{stepbox}[2. Reward framework (\S\ref{sec:method:reward})]
 Scores a \emph{group} of rollouts (candidate clause sets sampled for the same program, as in group-relative RL~\citep{shao2024deepseekmath}).
-Each rollout is reduced to its surviving inductive core, then scored by the fraction of negative traces it rejects (base), its ablation gain over the rest of the group (marginal), and a junk discount; scores are minimized across independent and held-out sampling seeds.
-Packaged as a slim containerized HTTP service (\texttt{POST /reward}) so any RL trainer can consume it, plus an offline JSONL/Parquet scorer.
+Each rollout is reduced to its surviving inductive core, then receives $0.5$ times the fraction of negative traces it rejects alone (base) plus $0.5$ times its ablation gain in the group union (marginal).  This is the entire reward formula.
+Packaged as a self-contained HTTP service (\texttt{POST /reward}) with gcc, Frama-C/WP, Why3, and Z3 bundled in the image, plus an offline JSONL/Parquet scorer.
 \end{stepbox}
 
 \begin{stepbox}[3. Inference framework (\S\ref{sec:method:inference})]
-Prompts the policy \emph{closed-book} (postcondition stripped) for the strongest ACSL invariants; unions $n$ rollouts, deduplicates, Houdini-prunes, re-annotates, and certifies with Frama-C/WP, re-rolling on failure.
-Supports cloud APIs and in-process batched vLLM for RL evaluation.
+Prompts the policy \emph{closed-book} by default, unions and deduplicates candidate rollouts, optionally runs up to $m$ rounds of WP-verdict feedback and LLM refinement, then applies full Houdini and Frama-C/WP verification.
+It is independent of the reward and never invokes the execution sampler or constructs positive/negative examples; a vLLM rollout provider supplies model candidates.
 \end{stepbox}
 
-A fourth ingredient---three adversarial evaluation gates (discrimination, hack sweep, mislabel audit)---is not part of the serving path but guards the reward's integrity as a regression suite ($\S$\ref{sec:experiments}).
+Two evaluation harnesses guard the implemented contract: discrimination over 10 deterministic programs with hand-written quality specifications, and a full-suite negative-mislabel audit ($\S$\ref{sec:experiments}).
 
 \paragraph{Running example.}
 Consider a benchmark loop (abridged from our linear suite):
@@ -67,5 +65,5 @@ void foo(int n) {  // requires n >= 0
 \end{lstlisting}
 The sampler observes loop-head states such as $(x{=}0, y{=}5)$, $(x{=}1, y{=}4)$, \dots for $n{=}5$ and many other inputs.
 Relational negatives perturb dense trace neighborhoods---$(x{=}2, y{=}4)$ with $n{=}5$ breaks $x + y = n$; bound negatives continue past the real exit---$(x{=}6, y{=}{-}1)$ preserves $x+y=n$ yet is impossible.
-The summary $\{x + y = n,\; 0 \le y \le n\}$ (with $n \ge 0$ from the precondition) rejects every negative trace and is seed-indifferent, scoring $\approx 1$; the guard restatement $y \ge 0$ rejects only bound negatives on one axis; a sprayed disequality farm rejects canonical negatives but collapses to the minimum on the held-out seed.
+The summary $\{x + y = n,\; 0 \le y \le n\}$ (with $n \ge 0$ from the precondition) rejects every constructed negative trace, whereas the guard restatement $y \ge 0$ rejects only a subset of the bound negatives and a tautology rejects none.
 Any exit-time fact a user later cares about---$x = n$, $y = 0$, $x \ge y$---follows from the summary, though the generator never saw such a target.

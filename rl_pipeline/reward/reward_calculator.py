@@ -2,13 +2,13 @@
 RewardCalculator — Component 2.
 
 Given a program and a GROUP of rollouts (each a candidate invariant set), score
-each rollout and the batch, using the negative examples from the sampler:
+each rollout and the batch, using synthetic negative candidates from the sampler:
 
-  base[A]     = fraction of negatives rejected by Houdini(A alone)   ("hudini 后的分数")
-  marginal[A] = fraction of negatives that Houdini(union) rejects but
+  base[A]     = fraction of candidates rejected by Houdini(A alone)
+  marginal[A] = fraction of candidates that Houdini(union) rejects but
                 Houdini(union \ A) does not                          (ablation 增益)
   reward[A]   = w_base * base[A] + w_marg * marginal[A]
-  batch_score = fraction of negatives rejected by Houdini(union)     (batch performance)
+  batch_score = fraction of candidates rejected by Houdini(union)    (batch performance)
   should_reroll = batch_score < reroll_threshold
 
 Scoring uses ONE canonical example set; soundness is delegated entirely to the
@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional, Set
 
-from ..common.program import Program, parse_program
+from ..common.program import parse_program
 from ..common.state import (
     State, eval_predicate, normalize_invariant, dedup_normalized, extract_invariants,
 )
@@ -75,7 +75,7 @@ class BatchReward:
         }
 
 
-def _rollout_invariants(rollout, prog: Program) -> List[str]:
+def _rollout_invariants(rollout) -> List[str]:
     """Accept {'invariants': [...]} or {'code': '<annotated>'} or a raw list/str.
 
     A string may be (a) a JSON-encoded dict/list (unwrapped and recursed), or
@@ -99,7 +99,7 @@ def _rollout_invariants(rollout, prog: Program) -> List[str]:
             except ValueError:
                 parsed = None
         if parsed is not None:
-            return _rollout_invariants(parsed, prog)
+            return _rollout_invariants(parsed)
         # raw text / annotated code: extract explicit `loop invariant` lines only
         invs = extract_invariants(s)
     else:
@@ -118,13 +118,17 @@ class RewardCalculator:
         logger: Optional[logging.Logger] = None,
         sampler_kwargs: Optional[dict] = None,
     ):
-        self.log = logger or logging.getLogger("rl_pipeline.reward")
-        self.filter = invariant_filter or filters.auto_filter(self.log)
+        log = logger or logging.getLogger("rl_pipeline.reward")
+        self.filter = invariant_filter or filters.auto_filter(log)
         self.w_base = w_base
         self.w_marg = w_marg
         self.reroll_threshold = reroll_threshold
         self.n_jobs = n_jobs or min(16, (os.cpu_count() or 8))
         self.sampler_kwargs = sampler_kwargs or {}
+        if self.w_base < 0 or self.w_marg < 0:
+            raise ValueError("reward weights must be non-negative")
+        if not 0.0 <= self.reroll_threshold <= 1.0:
+            raise ValueError("reroll_threshold must be between 0 and 1")
 
     # ── negative-rejection bookkeeping ───────────────────────────────────────
     @staticmethod
@@ -151,24 +155,26 @@ class RewardCalculator:
 
     @staticmethod
     def _to_groups(state_rej: Set[int], groups: List[List[int]]) -> Set[int]:
-        """Impossible-trace indices rejected: a trace is excluded when ANY of
-        its witness states is (an invariant false at one point of the history
-        proves the whole history cannot be produced)."""
+        """Candidate-trace indices rejected when any witness state is rejected."""
         return {g for g, idxs in enumerate(groups) if any(i in state_rej for i in idxs)}
 
     def _compute_one(self, source: str, rollouts: List, examples: ExampleSet,
                      loop_idx: int = 0) -> BatchReward:
         prog = parse_program(source)
+        if not 0 <= loop_idx < len(prog.loops):
+            raise ValueError(
+                f"loop_idx {loop_idx} is out of range for {len(prog.loops)} loops"
+            )
         positives = examples.pos(loop_idx)
         negatives = examples.neg(loop_idx)
-        # scoring unit = impossible TRACE (witness group), not witness state
+        # Scoring unit = synthetic trace candidate (witness group), not state.
         if hasattr(examples, "groups"):
             groups = examples.groups(loop_idx)
         else:
             groups = [[i] for i in range(len(negatives))]
         n_neg = len(groups)
 
-        roll_invs = [_rollout_invariants(r, prog) for r in rollouts]
+        roll_invs = [_rollout_invariants(r) for r in rollouts]
 
         # memoize filter results across base/union/ablation calls — the ablation
         # subsets (∪ \ A) overlap heavily, so identical invariant sets are filtered

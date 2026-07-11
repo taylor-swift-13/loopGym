@@ -3,14 +3,14 @@ Self-contained C instrumentation + execution for collecting loop-ENTRY
 valuations (the sampler's definition of a "sample").
 
 No dependency on src/ — the sampler component is standalone.  We:
-  1. instrument the target function to print the loop-entry variable valuation
-     on entry, at the top of every iteration, and once on exit;
+  1. instrument the target function to print the loop-entry valuation on entry,
+     through a dense prefix and periodic bursts, and once on exit;
   2. generate a main() that calls the function with sampled inputs (respecting
      the FULL `requires`, including param-vs-param constraints), sweeping a
      broad range of magnitudes/signs/edge values;
   3. compile with gcc and run, capturing the printed valuations.
 
-Truthfulness guarantees (the reward depends on them):
+Trace-collection safeguards (the reward depends on them):
   * loops run to their REAL exit — the iteration cap is a huge safety net for
     divergent loops only.  Printing is throttled (dense prefix + periodic
     bursts + exit), so long loops stay cheap while every printed state carries
@@ -43,10 +43,6 @@ _PRINT_MAX = 20_000      # hard per-run print budget
 _MARK = "__LH__"
 _DEFAULT_MIN = -64
 _DEFAULT_MAX = 64
-
-
-def gcc_available() -> bool:
-    return shutil.which("gcc") is not None
 
 
 # ── input domain ────────────────────────────────────────────────────────────
@@ -144,6 +140,48 @@ def _grid_tuple(params: List[str], cons: Dict[str, Dict[str, int]], r: int, seed
     return vals
 
 
+def _requirement_tuples(params: List[str], cons: Dict[str, Dict[str, int]],
+                        requires: str, seed: int):
+    """Target large constants and simple parameter relations in `requires`.
+
+    The regular tier grid is intentionally small.  Clauses such as
+    `a == b + 10000` still need in-contract inputs, so combine every literal
+    with small offsets on each ordered parameter pair before giving up.
+    """
+    literals = sorted({int(v) for v in re.findall(r"(?<![A-Za-z_])-?\d+", requires)})
+    offsets = _TIERS[:12]
+
+    def bounded(value: int, param: str) -> int:
+        lo = cons.get(param, {}).get("min")
+        hi = cons.get(param, {}).get("max")
+        if lo is not None:
+            value = max(value, lo)
+        if hi is not None:
+            value = min(value, hi)
+        return int(value)
+
+    for literal in literals:
+        for offset_idx, offset in enumerate(offsets):
+            base = {
+                p: _clamp_tier(
+                    _TIERS[(seed + offset_idx + index) % len(_TIERS)], cons, p
+                )
+                for index, p in enumerate(params)
+            }
+            for param in params:
+                vals = dict(base)
+                vals[param] = bounded(literal + offset, param)
+                yield vals
+            for left in params:
+                for right in params:
+                    if left == right:
+                        continue
+                    vals = dict(base)
+                    vals[right] = bounded(offset, right)
+                    vals[left] = bounded(literal + offset, left)
+                    yield vals
+
+
 def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: int,
                   seed: int = 0, requires: str = "", single_ok: bool = True) -> List[Dict[str, int]]:
     """Deterministic broad sweep of input tuples honoring the FULL requires.
@@ -153,6 +191,9 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
     violating tuples are skipped — inputs outside the precondition would produce
     "reachable" states no true invariant has to cover, poisoning the filter.
     """
+    if n_runs < 1:
+        raise ValueError("n_runs must be at least 1")
+
     runs: List[Dict[str, int]] = []
     seen: set = set()
 
@@ -162,7 +203,7 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
             return False
         if requires:
             ok = eval_predicate(requires, State(vars=dict(vals), pre=dict(vals)))
-            if ok is False:
+            if ok is not True:
                 return False
         seen.add(key)
         runs.append(vals)
@@ -175,7 +216,7 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
     if params:
         probe_count = _FAR_COUNT + (2 if len(params) > 1 else 0)
         for k in range(probe_count):
-            if len(runs) >= max(n_runs, probe_count):
+            if len(runs) >= n_runs:
                 break
             admit(_far_probe(params, cons, seed, k))
     # phase 1 — diverse stripe tuples (all params move together)
@@ -192,17 +233,35 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
     while len(runs) < n_runs and r < limit:
         admit(_grid_tuple(params, cons, r, seed))
         r += 1
-    if not runs:            # unparseable/unsatisfiable requires -> best effort
-        runs = [_tier_tuple(params, cons, r, seed) for r in range(n_runs)]
+    # Phase 3 targets large constants and pairwise offsets from the contract.
+    if requires and len(runs) < n_runs:
+        for vals in _requirement_tuples(params, cons, requires, seed):
+            admit(vals)
+            if len(runs) >= n_runs:
+                break
+    if not runs:
+        detail = f" satisfying requires: {requires}" if requires else ""
+        raise ValueError("could not construct any input" + detail)
+    if not single_ok and len(runs) < n_runs:
+        # Oracle-controlled programs need repeated executions even when the
+        # precondition admits only one input tuple. Each generated main gets a
+        # distinct srand seed in collect_traces().
+        unique_runs = list(runs)
+        runs.extend(
+            dict(unique_runs[index % len(unique_runs)])
+            for index in range(n_runs - len(runs))
+        )
     return runs
 
 
 # ── instrumentation ─────────────────────────────────────────────────────────
 
-def _printf_stmt(loop_idx: int, tag: str, pre_vars: List[str], it_expr: str = "0") -> str:
-    fmt = " ".join(f"{v}=%d" for v in pre_vars)
+def _printf_stmt(loop_idx: int, tag: str, pre_vars: List[str], unsigned_vars,
+                 it_expr: str = "0") -> str:
+    fmt = " ".join(f"{v}={'%u' if v in unsigned_vars else '%d'}" for v in pre_vars)
     args = ", ".join(pre_vars)
-    return f'printf("{_MARK}{tag}{loop_idx} #%d {fmt}\\n", {it_expr}, {args}); '
+    suffix = f", {args}" if args else ""
+    return f'printf("{_MARK}{tag}{loop_idx} #%d {fmt}\\n", {it_expr}{suffix}); '
 
 
 def instrument(source: str, prog: Program, loop_idx: int = 0) -> str:
@@ -218,14 +277,15 @@ def instrument(source: str, prog: Program, loop_idx: int = 0) -> str:
     time.  These continue the loop's REAL dynamics past the exit, so they
     preserve every relation (linear AND nonlinear, e.g. z==x*y) while going OUT
     of the reachable range — exactly the hard "law holds but bound violated"
-    negatives."""
+    synthetic negative candidates."""
     loop = prog.loops[loop_idx]
     pv = prog.pre_vars
+    unsigned = set(prog.unsigned_vars)
     li = loop_idx
-    entry = _printf_stmt(li, "E", pv, "0")                     # entry (before loop)
-    head = _printf_stmt(li, "H", pv, f"__it{li}")              # top of body
-    exit_ = _printf_stmt(li, "X", pv, f"__it{li} + 1")         # after loop (guard false)
-    over_pf = _printf_stmt(li, "O", pv, "-1")                  # over-run (past the guard)
+    entry = _printf_stmt(li, "E", pv, unsigned, "0")
+    head = _printf_stmt(li, "H", pv, unsigned, f"__it{li}")
+    exit_ = _printf_stmt(li, "X", pv, unsigned, f"__it{li} + 1")
+    over_pf = _printf_stmt(li, "O", pv, unsigned, "-1")
     counters = f"int __it{li}=0; int __pr{li}=0; "
     gate = (
         f'if(++__it{li} > {_ITER_CAP}) {{ printf("{_MARK}C{li}\\n"); break; }} '
@@ -332,12 +392,19 @@ def _compile_run_parse(full: str, prog: Program, inputs, loop_idx, timeout, run_
         try:
             subprocess.run(["gcc", csrc, "-o", cbin], check=True,
                            capture_output=True, text=True, timeout=10)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return [], False
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "unknown compiler error").strip()
+            raise ValueError(f"gcc failed to compile instrumented program: {detail[:500]}") from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"could not compile instrumented program: {exc}") from exc
         try:
             res = subprocess.run([cbin], capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return [], True     # treat a wall-clock kill like a capped (incomplete) run
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            states, _ = _parse_output(stdout, loop_idx, prog.pre_vars, inputs, run_id)
+            return states, True
         return _parse_output(res.stdout, loop_idx, prog.pre_vars, inputs, run_id)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -359,6 +426,9 @@ def collect_traces(
     can disable range-based reasoning."""
     src = source_override if source_override is not None else prog.source
     cons = param_constraints(prog.requires, prog.params)
+    for param in prog.unsigned_vars:
+        if param in cons:
+            cons[param]["min"] = max(0, cons[param].get("min", 0))
     # nondeterministic programs need many runs even with no/identical inputs:
     # each run gets a distinct srand, exploring different unknown() traces
     deterministic = not re.search(r"\bunknown\w*\s*\(", src)
@@ -378,15 +448,6 @@ def collect_traces(
                     overrun.append(s)
             else:
                 reachable.append(s)
+    if not reachable:
+        raise ValueError("sampling produced no reachable loop-head states")
     return reachable, overrun, capped_any
-
-
-def collect_reachable(
-    prog: Program,
-    loop_idx: int = 0,
-    n_runs: int = 24,
-    source_override: Optional[str] = None,
-    seed: int = 0,
-) -> List[State]:
-    """Reachable loop-head states only (positives)."""
-    return collect_traces(prog, loop_idx, n_runs, source_override, seed)[0]

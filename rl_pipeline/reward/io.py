@@ -16,7 +16,7 @@ ready to feed an RL trainer (verl/OpenRLHF style).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -33,7 +33,6 @@ class Batch:
     group_id: Any
     program: str
     rollouts: List[Any]
-    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 def _read_rows(path: str) -> List[Dict[str, Any]]:
@@ -77,8 +76,6 @@ def read_batches(path: str, cfg: Optional[IOConfig] = None) -> List[Batch]:
                 group_id=r.get(cfg.group_field, i),
                 program=r[cfg.program_field],
                 rollouts=_norm_list(r.get(cfg.rollouts_field)),
-                extra={k: v for k, v in r.items()
-                       if k not in (cfg.program_field, cfg.rollouts_field, cfg.group_field)},
             ))
     else:  # flat: group consecutive rows by group_field (falls back to program)
         order: List[Any] = []
@@ -115,8 +112,8 @@ def batch_reward_to_rows(batch: Batch, br, include_program: bool = False) -> Lis
             "base": rs.base,
             "marginal": rs.marginal,
             "rejected": rs.rejected,
-            "invariants": json.dumps(rs.invariants, ensure_ascii=False),
-            "survivors": json.dumps(rs.survivors, ensure_ascii=False),
+            "invariants": rs.invariants,
+            "survivors": rs.survivors,
             "batch_score": br.batch_score,
             "should_reroll": br.should_reroll,
             "filter_mode": br.filter_mode,

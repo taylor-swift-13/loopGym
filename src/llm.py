@@ -1,9 +1,11 @@
 import openai
 import re
 import threading
-from config import LLMConfig
+from .config import LLMConfig
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
+
+from rl_pipeline.common import prompts
 
 
 # 全局 token 统计追踪器
@@ -69,28 +71,7 @@ def reset_token_stats():
 class BaseChatModel(ABC):
     def __init__(self, config: LLMConfig):
         self.config = config
-        # 从文件加载system prompt
-        import os
-        # Single deterministic prompt — no CoT.
-        self._cot_mode = False
-        prompt_filename = getattr(config, 'system_prompt_file', 'system_prompt.txt')
-        # canonical location: <repo-root>/prompt/ (all prompts are maintained there);
-        # src/prompts/ kept as a legacy fallback
-        _here = os.path.dirname(__file__)
-        candidates = [os.path.join(_here, '..', 'prompt', prompt_filename),
-                      os.path.join(_here, 'prompts', prompt_filename)]
-        system_prompt = None
-        for system_prompt_path in candidates:
-            try:
-                with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                    system_prompt = f.read()
-                break
-            except Exception:
-                continue
-        if system_prompt is None:
-            system_prompt = "You are a helpful assistant."
-            print(f"Warning: Failed to load system prompt from any of {candidates}")
-        self.messages = [{"role": "system", "content": system_prompt}]
+        self.system_message = {"role": "system", "content": prompts.system_prompt()}
 
     @abstractmethod
     def generate_response(self, user_input: str) -> str:
@@ -101,20 +82,15 @@ class BaseChatModel(ABC):
         pass
 
     def _process_response_think_tags(self, response_text: str) -> str:
-        """
-        处理响应中的 <think> / <reasoning> / <code> 标签。
-        - 始终 strip 原生 <think>（Qwen 等），只保留 prompt 驱动的 <reasoning>
-        - 非 COT prompt（system_prompt.txt）时额外 strip <reasoning> 和 <code> 标签
-        """
+        """Drop hidden reasoning blocks and unwrap an optional code block."""
         if not response_text:
             return ""
-        # Always strip native <think>; only prompt-driven <reasoning> is kept
+        # The invariant parser consumes only the visible final answer.
         text = re.sub(r'<\s*think\s*>[\s\S]*?<\s*/\s*think\s*>', '', response_text, flags=re.IGNORECASE)
-        if not self._cot_mode:
-            text = re.sub(r'<\s*reasoning\s*>[\s\S]*?<\s*/\s*reasoning\s*>', '', text, flags=re.IGNORECASE)
-            # Strip <code> wrapper, keep inner content
-            text = re.sub(r'<\s*code\s*>\s*', '', text, flags=re.IGNORECASE)
-            text = re.sub(r'\s*<\s*/\s*code\s*>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'<\s*reasoning\s*>[\s\S]*?<\s*/\s*reasoning\s*>', '', text, flags=re.IGNORECASE)
+        # Strip <code> wrapper, keep inner content.
+        text = re.sub(r'<\s*code\s*>\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*<\s*/\s*code\s*>', '', text, flags=re.IGNORECASE)
         return text.strip()
 
 
@@ -123,20 +99,13 @@ class OpenAILLM(BaseChatModel):
     def __init__(self, config: LLMConfig):
         super().__init__(config)
         self.model_name = config.api_model
-        self._clients = [openai.OpenAI(base_url=config.base_url, api_key=config.api_key)]
-        self._rr_lock = threading.Lock()
-        self._rr_counter = 0
+        self.client = openai.OpenAI(base_url=config.base_url, api_key=config.api_key)
         self.temperature = self.config.api_temperature
         self.top_p = self.config.api_top_p
         self.max_tokens = max(1, int(getattr(self.config, "api_max_tokens", 256)))
 
-    def _next_client(self):
-        with self._rr_lock:
-            idx = self._rr_counter % len(self._clients)
-            self._rr_counter += 1
-        return self._clients[idx]
-
-    def _coerce_message_content_to_text(self, content) -> str:
+    @staticmethod
+    def _coerce_message_content_to_text(content) -> str:
         """Normalize OpenAI message.content (string/list/None) into plain text."""
         if content is None:
             return ""
@@ -165,13 +134,13 @@ class OpenAILLM(BaseChatModel):
 
     def generate_response(self, user_input: str) -> str:
         try:
-            # 添加用户Input到消息历史
-            self.messages.append({"role": "user", "content": user_input})
+            # Every rollout/refine call is stateless by contract.
+            messages = [self.system_message, {"role": "user", "content": user_input}]
 
             def _call_chat(max_tokens: int):
-                return self._next_client().chat.completions.create(
+                return self.client.chat.completions.create(
                     model=self.model_name,
-                    messages=self.messages,
+                    messages=messages,
                     temperature=self.temperature,
                     top_p=self.top_p,
                     max_tokens=max_tokens,
@@ -212,17 +181,12 @@ class OpenAILLM(BaseChatModel):
                     total_tokens=response.usage.total_tokens
                 )
             
-            # 处理 <think> 标签，并更新历史
+            # 处理模型可能返回的推理标签
             processed_response = self._process_response_think_tags(assistant_response)
-            self.messages.append({"role": "assistant", "content": assistant_response}) # 原始响应加入历史以保持完整上下文
-
             return processed_response
 
         except Exception as e:
             print(f"OpenAI API 调用失败: {e}")
-            # 从历史中移除失败的用户Input，避免下次重复发送
-            if self.messages and self.messages[-1]["role"] == "user":
-                self.messages.pop()
             return f"生成响应失败: {e}"
 
 # ==============================================================================
@@ -243,6 +207,8 @@ class TransformersClient:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        if not model_path:
+            raise ValueError("local_model_path is required when use_local=True")
         print(f"[TransformersClient] 正在加载模型: {model_path} ...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -332,14 +298,14 @@ class TransformersLLMImpl(BaseChatModel):
         self._max_tokens = max(1, int(config.api_max_tokens))
 
     def generate_response(self, user_input: str) -> str:
-        self.messages.append({"role": "user", "content": user_input})
+        messages = [self.system_message, {"role": "user", "content": user_input}]
         try:
             text, prompt_tokens, completion_tokens = self._client.chat_messages(
-                self.messages,
+                messages,
                 temperature=self._temperature,
                 top_p=self._top_p,
                 max_new_tokens=self._max_tokens,
-                enable_thinking=self._cot_mode,
+                enable_thinking=False,
             )
             _token_tracker.record(
                 prompt_tokens=prompt_tokens,
@@ -347,12 +313,9 @@ class TransformersLLMImpl(BaseChatModel):
                 total_tokens=prompt_tokens + completion_tokens,
             )
             processed = self._process_response_think_tags(text)
-            self.messages.append({"role": "assistant", "content": text})
             return processed
         except Exception as e:
             print(f"Transformers 推理失败: {e}")
-            if self.messages and self.messages[-1]["role"] == "user":
-                self.messages.pop()
             return f"生成响应失败: {e}"
 
 
@@ -363,39 +326,13 @@ class TransformersLLMImpl(BaseChatModel):
 # ==============================================================================
 class Chatbot:
     def __init__(self, config: LLMConfig):
-        self.config = config
         if getattr(config, "use_local", False):
             self.llm_instance = TransformersLLMImpl(config)
         else:
             self.llm_instance = OpenAILLM(config)
 
     def chat(self, user_input: str) -> str:
-        if self.llm_instance is None:
-            print("Error: LLM instance is None, cannot generate response")
-            return "Error: LLM instance not initialized"
         return self.llm_instance.generate_response(user_input)
-
-
-
-# 示例用法
-if __name__ == "__main__":
-    # --- 示例 1: 使用 API 模型 ---
-    print("--- 示例 1: 使用 API 模型 ---")
-    api_config = LLMConfig()
-    api_config.use_api_model = True 
-    api_bot = Chatbot(api_config)
-
-    user_input_api_1 = "你好，你是一个什么样的助手？"
-    print(f"User: {user_input_api_1}")
-    response_api_1 = api_bot.chat(user_input_api_1)
-    print(f"Bot: {response_api_1}")
-    print("----------------------")
-
-    user_input_api_2 = "请问草莓(strawberries)里有多少个字母 'r'？"
-    print(f"User: {user_input_api_2}")
-    response_api_2 = api_bot.chat(user_input_api_2)
-    print(f"Bot: {response_api_2}")
-    print("----------------------")
 
 
  

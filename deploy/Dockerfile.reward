@@ -44,13 +44,12 @@ COPY rl_pipeline/reward/      /app/rl_pipeline/reward/
 COPY prompt/                  /app/prompt/
 
 # --- src modules the real HoudiniFilter reuses (frama-c/WP driver + spec checks) ---
-COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
-     src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
+COPY src/__init__.py src/config.py src/houdini_pruner.py \
+     src/output_verify.py src/syntax_checker.py /app/src/
 
 # Build-time proof the image is self-sufficient: gcc sampling works AND the
 # real-Houdini path is wired (frama-c present -> cascade). Fails the build if not.
-RUN python -c "import sys; sys.path.insert(0,'src'); \
-from rl_pipeline.reward import filters as F; \
+RUN python -c "from rl_pipeline.reward import filters as F; \
 assert F.frama_c_available(), 'frama-c missing in image'; \
 assert F.auto_filter().name.startswith('cascade'), 'filter is not cascade(lite->houdini)'; \
 from rl_pipeline.sampler import ExampleSampler; \

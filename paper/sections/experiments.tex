@@ -6,48 +6,31 @@
 \label{sec:exp:setup}
 
 \paragraph{Benchmarks.}
-We evaluate on 366 C loop programs in two suites.
-\textbf{Linear} (316 programs) contains single-loop affine programs in the style of SV-COMP loop tracks~\citep{svcomp}; roughly 40\% use nondeterministic guards or branches (\texttt{unknown()}), exercising the sampler's soundness rescues.
+We evaluate the sampler on all 366 C loop programs in two suites.
+\textbf{Linear} (316 programs) contains single-loop affine programs in the style of SV-COMP loop tracks~\citep{svcomp}, including nondeterministic guards and branches (\texttt{unknown()}).
 \textbf{NLA} (50 programs) contains the standard non-linear arithmetic suite~\citep{nguyen2012using,nla2019}: polynomial identities (cubes, geometric sums), gcd/extended-gcd, and division-by-subtraction algorithms whose summaries require products and higher-degree terms (e.g.\ $y = 3n^2 + 3n + 1$, $ps - rq = 1$, $z = xy$).
-Every program carries a trailing assertion; it is used \emph{only} for final end-to-end checking and is hidden from the sampler and the generator throughout.
+Assertions are present in 356 programs and absent in 10; when present they are ignored by the sampler and hidden from the generator in closed-book mode.
 
 \paragraph{Backends and configuration.}
-Positives/negatives are sampled with 12 runs per seed under the canonical 20-tier sweep; inductiveness and final certification use Frama-C/WP with Z3 (30\,s per goal, Typed memory model); reward weights and caps are the defaults of $\S$\ref{sec:method:reward}.
-The reward runs as a slim container (no prover, no GPU dependencies) and scores a rollout group in the low seconds per program, dominated by Houdini when the prover is enabled.
+Positives and negative candidates use the canonical 12-run, seed-0 configuration.  Inductiveness and final certification use Frama-C/WP with Z3 (30\,s per goal, Typed memory model), and reward weights are $w_b=w_m=0.5$.
+The reward image needs no GPU and bundles gcc, Frama-C/WP, Why3, and Z3, so the training host calls the HTTP service without a local prover installation.
 
-\subsection{Adversarial Validation of the Reward}
+\subsection{Reward Regression Checks}
 \label{sec:exp:gates}
 
-A reward for RL is only as good as its worst exploit, so before any policy training we validate the reward itself with three adversarial regression gates run across both suites.
+A reward for RL depends on both quality discrimination and correct example labels.  The repository therefore maintains two checks that exercise the implemented reward directly.
 
-\paragraph{Gate 1: discrimination.}
-For each program we score hand-constructed families: \emph{gold} (true tight summaries), \emph{loose} (sound but weak, e.g.\ guard restatements, slack boxes), and \emph{adversarial} (mega-conjunctions, split sprays, gold-plus-spray, sample-extreme boxes, pointwise farms).
-The gate requires the strict quality order $\mathrm{gold} \ge \mathrm{loose} > \mathrm{hack}$ pointwise, memorizers at least $0.15$ below gold, and sample-extreme boxes collapsing on the holdout seed.
-\textbf{Result: 0 violations.}
+\paragraph{Discrimination harness.}
+The current harness contains 10 hand-written specifications spanning long linear loops, symbolic bounds, division, polynomial relations, products, and extended GCD.  Nondeterministic programs are excluded because the conservative sampler emits no synthetic negatives for oracle-controlled loops.  For each selected program it scores up to six known-quality families: \emph{gold}, \emph{loose}, \emph{trivial}, \emph{guard copy}, \emph{post copy} when an assertion exists, and an \emph{unsound} sampled-value pin.
+It checks that all gold clauses survive, gold base rejection is at least $0.8$, loose does not beat gold, and the trivial, guard-copy, post-copy, and unsound baselines remain at least $0.15$ below gold (except a postcondition explicitly marked as a genuine invariant).  The harness uses the deployed filter cascade and fails on any ranking or sampler-label violation.
+The measured real-Frama-C run completed all 10 specifications with \textbf{0 violations}; every gold clause survived and the minimum gold base score was $0.996$.
 
-\paragraph{Gate 2: gold-free hack sweep.}
-Independent of any gold reference, parametric adversary families sweep their capacity (clause counts, atom counts, farm sizes) against every program; the gate requires that no adversary configuration attains the reward of a true summary on any program.
-\textbf{Result: 0 violations.}
+\paragraph{Full mislabel audit.}
+For every benchmark program, the audit constructs negative candidates from the canonical 12-run sample, then checks whether the exact variable/pre-state pair appears reachable in larger 24-run samples using both the canonical seed and seed 9.  Such a pair collision is a hard label error that corrupts the tightness denominator; variable-only overlap with a different pre-state is reported separately as a soft diagnostic.
+The measured full run covered all 366 programs and 486,302 negative witness states, with \textbf{0 hard mislabels}.  It also reported 269 variable-only overlaps across 18 programs where the associated pre-state differed; these are soft diagnostics, not pair-level label collisions.
 
-\paragraph{Gate 3: mislabel audit.}
-Truthfulness of negatives is audited directly: every emitted negative trace unit is re-checked against exhaustive forward reachability within the audited window, and any reachable state labeled negative is a hard failure (it would penalize true invariants).
-\textbf{Result: 0 hard mislabels} across all 366 programs, including the nondeterministic subset where negatives come only from the rescue constructions.
-
-Together the gates certify the two properties a hack-resistant verifiable reward needs: \emph{soundness} (no true invariant is punished) and \emph{discrimination} (no known exploit outscores truth).
-They run as a regression suite, so any future change to the sampler or reward must re-pass them.
-
-\subsection{Policy Training and End-to-End Generation}
+\subsection{Current Scope and Future End-to-End Evaluation}
 \label{sec:exp:rl}
 
-%% TODO(experiments): fill in once RL runs complete.
-%% - Base models: Qwen-2.5-Coder-7B (local vLLM), GPT-5-nano (API reference)
-%% - Trainer: GRPO against the HTTP reward service; n rollouts/group = 8
-%% - Metrics: (a) mean final reward (summary tightness) on held-out programs;
-%%   (b) Frama-C-certified summary rate (closed-book);
-%%   (c) downstream: fraction of benchmark assertions discharged by the
-%%       generated summary alone (I ∧ ¬B ⇒ Q via WP), WITHOUT showing Q;
-%%   (d) ablations: -holdout, -junk, -atom budget, -far probes/jitter
-%%       (expect reward inflation + hack families reappearing);
-%%   (e) open-book vs closed-book comparison.
-Policy-training results are in progress and will be reported in the final version: we train a locally deployable code model with GRPO against the containerized reward service, and evaluate (a) summary tightness on held-out programs, (b) the Frama-C-certified summary rate, and (c) the \emph{downstream} rate at which the closed-book summary alone discharges the benchmark's hidden assertion---the direct test of the claim that summaries subsume targets.
-Ablations remove each anti-hacking layer in turn; by construction of the gates in $\S$\ref{sec:exp:gates} we can measure not only reward inflation but the reappearance of specific exploit families.
+This artifact implements and validates the sampler/reward contract and inference framework; it does not include a trained policy, checkpoint, or policy-training result.  Consequently, the two regression harnesses above are the complete empirical results reported here and should not be read as an end-to-end model-quality claim.
+Future policy evaluation should report (a) candidate-trace rejection on held-out programs, (b) the Frama-C-certified summary rate, and (c) the downstream rate at which a closed-book summary discharges a hidden benchmark assertion.  It should compare the plain pipeline with fixed refinement budgets, shuffled-feedback controls, equal-budget re-generation, and open-book generation.

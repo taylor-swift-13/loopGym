@@ -1,16 +1,28 @@
 # Training Integration Guide — 训练侧开箱即用
 
-The RL trainer (verl / OpenRLHF / custom GRPO) needs **only the reward HTTP
-service**. It never imports `rl_pipeline`, never needs a local frama-c, and
-never builds a prompt by hand — the service returns fully-assembled prompts and
-per-rollout scalar rewards. This document is the complete integration contract.
+The RL trainer (verl / OpenRLHF / custom GRPO) calls the reward HTTP service for
+sampling-backed scores and refine feedback. It does not import `rl_pipeline` or
+need a local Frama-C installation. The trainer still owns **generation prompt
+construction**: load `prompt/generate_prompt.txt`, format its `{program}` field
+with the target-free program shown to the policy, and use
+`prompt/system_prompt.txt` as the system message where the chat stack supports
+one. The service assembles only the refine prompt returned by
+`POST /refine_feedback`.
+
+Keep two program forms in the trainer or dataset:
+
+- `visible_program`: the closed-book function used in the generation prompt,
+  with `assert`/`ensures` hidden;
+- `full_program`: the original function sent to reward endpoints, including its
+  contract and assertion.
 
 ```
-trainer (GPU box)                       reward service (Docker, CPU box)
-─────────────────                       ─────────────────────────────────
-sample generation rollouts  ──────────► POST /reward          → rewards[]
-merge pool, ask for prompt  ──────────► POST /refine_feedback → refine prompt
-sample refine rollouts      ──────────► POST /refine_reward   → delta_base[]
+trainer (GPU box)                         reward service (Docker, CPU box)
+─────────────────                         ─────────────────────────────────
+format generate_prompt + sample rollouts
+                                  ──────► POST /reward          → rewards[]
+merge pool                       ──────► POST /refine_feedback → refine prompt
+sample refine rollouts           ──────► POST /refine_reward   → delta_base[]
 ```
 
 ---
@@ -30,12 +42,15 @@ curl -s localhost:8000/health
 frama-c is missing and every reward is computed without the real Houdini
 cascade — abort and fix the image/PATH.
 
-**Native (this machine):** frama-c is NOT on the default PATH (default opam
-switch is `qcp-8.20`):
+**Native:** install the Python service dependencies, activate an environment in
+which `gcc`, `frama-c`, `why3`, and `z3` are on `PATH`, then start the service
+from the repository root:
 
 ```bash
-PATH="$HOME/.opam/frama-c.27.1/bin:$PATH" \
-  python -m rl_pipeline.reward.service --host 0.0.0.0 --port 8000
+python3 -m pip install -r deploy/requirements-reward.txt
+gcc --version
+why3 config detect
+python3 -m rl_pipeline.reward.service --host 0.0.0.0 --port 8000
 ```
 
 ## 2. Endpoints
@@ -65,7 +80,7 @@ One call per prompt-group (the n rollouts sampled from one program's prompt).
 }
 ```
 
-Semantics: `base[A]` = fraction of impossible-trace negatives rejected by the
+Semantics: `base[A]` = fraction of sampled negative-candidate traces rejected by the
 Houdini survivors of A alone; `marginal[A]` = A's irreplaceable contribution to
 the group union (ablation); `reward = w_base·base + w_marg·marginal`. Negatives
 derive from the program's loop only (never the assert), so scoring stays
@@ -76,7 +91,9 @@ cached in-process.
 
 Call after scoring a generation group: merge that group's rollouts into `pool`
 and let the service verdict it (syntax scrub + at most two WP rounds, no
-fixpoint).
+fixpoint). The first WP round checks the full pool. A second round runs only
+when establishment failures were removed, so preservation is not masked by
+inconsistent hypotheses.
 
 ```jsonc
 // request
@@ -96,6 +113,17 @@ fixpoint).
   "prompt": "<the COMPLETE refine prompt — feed this string to the policy as-is>"
 }
 ```
+
+This endpoint requires the real Houdini stage. If Frama-C is unavailable,
+`filters.auto_filter()` has no WP precheck stage and the endpoint responds with
+HTTP 503:
+
+```json
+{"detail":"no WP precheck stage (frama-c unavailable)"}
+```
+
+Treat this as a deployment error for refine training; do not retry the same
+request until the service environment is fixed.
 
 Every rejected invariant carries its specific WHY: `syntax` quotes frama-c's
 actual parse error, `wp` distinguishes *fails establishment* (false at loop
@@ -117,7 +145,7 @@ deployment distributions match by construction.
 // response (order-aligned with refinements)
 {
   "delta_base": [0.0090, 0.0],   // ← the GRPO group rewards
-  "base_before": 0.0, "base_after": [0.0090, 0.0], "pool_size": 2
+  "base_before": 0.0, "base_after": [0.0090, 0.0], "pool_size": 3
 }
 ```
 
@@ -133,7 +161,9 @@ can rely on:
 - Under GRPO group normalization the shared `base_before` is absorbed, so Δ and
   the absolute score are gradient-equivalent; the Δ form is for monitoring
   ("how much discrimination each refinement recovered").
-- Cost: n+1 Houdini cascades per group (`base_before` computed once).
+- `base_before` is shared across the group. Identical invariant sets are
+  memoized, but trainers should still budget for multiple Frama-C runs per
+  refine group.
 
 ### 2.4 `POST /sample` (debug) and `GET /health`
 
@@ -144,8 +174,9 @@ the filter mode and cache size.
 
 ```
 each RL step:
-  1. generation groups: program prompt (prompt/generate_prompt.txt semantics)
-       → n rollouts → POST /reward → rewards           (unchanged, single-turn)
+  1. generation groups: trainer loads prompt/generate_prompt.txt,
+       formats {program}=visible_program, and samples n rollouts
+       → POST /reward with full_program → rewards       (single-turn)
   2. harvest: for each generation group,
        pool = union of its n rollouts
        → POST /refine_feedback
@@ -170,9 +201,6 @@ Design rules (的重要性顺序):
    (this is the SCoRe-collapse avoidance, structurally).
 4. Refine prompts are harvested from the previous step's policy — one step
    stale, which is standard and fine. No static failure pool to maintain.
-5. If refine-group non-zero-reward rate stays < ~10% after a few hundred
-   steps, consider a small shaping bonus (+0.05 for compiling) — but try
-   without it first.
 
 ## 4. Inference-side m-round refine (deployment / eval)
 
@@ -184,41 +212,47 @@ res.final_invariants, res.verified, res.refine_rounds
 ```
 
 Loop per attempt: generate n rollouts → merge → up to `m_refine` rounds of
-(WP precheck → verdict feedback → LLM refine → refined candidates JOIN the
-pool, originals kept — a later companion can rescue an earlier reject) → full
-Houdini fixpoint → Frama-C verify. Early stops: nothing rejected / pool
-fixpoint / round budget. The final verify gate means refine can never make the
-accepted output worse than m=0.
+(syntax scrub + at most two WP rounds → verdict feedback → LLM refine → refined
+candidates JOIN the pool, originals kept) → full Houdini fixpoint → Frama-C
+verify. Early stops: nothing rejected / pool fixpoint / round budget.
 
-## 5. Evaluation matrix (§5.3 ablations)
-
-| training           | inference m=0 | m=1 | m=3 |
-|--------------------|---------------|-----|-----|
-| generation only    | headline      |  ·  |  ·  |
-| generation + refine| headline'     |  ·  |  ·  |
-
-Report single-shot closed-book pass rate as the headline row; refined results
-as separate "+ refine loop" rows — never mixed. Two sanity checks: (a) refine
-must beat blind re-roll at equal sample budget; (b) shuffled-feedback ablation
-must hurt (else the model ignores the feedback).
-
-## 6. Offline batch path (no HTTP)
+## 5. Offline batch path (no HTTP)
 
 `rl_pipeline/reward/io.py` reads JSONL/Parquet rollout batches (grouped or
 flat layout) and writes one reward row per rollout — for offline scoring runs.
 `rl_pipeline/reward/score_file.py` is the CLI wrapper. Refine scoring offline:
 `rl_pipeline.reward.refine.refine_group_delta_base(program, pool, refinements)`.
 
-## 7. Gotchas
+The scorer's sampler interface is intentionally limited to the canonical run
+count and seed:
 
-- **frama-c PATH** (native runs): always `PATH="$HOME/.opam/frama-c.27.1/bin:$PATH"`.
-  Symptom of forgetting: `filter_mode: "positive"` in /health, and the syntax
-  scrub silently rejects every invariant as a parse error.
-- **Prompts are files, not code**: everything under `prompt/` (`generate_prompt.txt`,
-  `refine_prompt.txt`, `system_prompt.txt`). Edit there; both Docker images COPY
-  the directory. Never inline prompt text in the trainer.
-- `pool` sent to `/refine_reward` must be byte-identical to the `pool` echoed
-  by `/refine_feedback` (it is normalized+deduped server-side) — Δbase is only
-  meaningful against the pool the prompt actually showed.
+```bash
+python3 -m rl_pipeline.reward.score_file \
+  --input rollouts.jsonl \
+  --output rewards.jsonl \
+  --runs 12 \
+  --seed 0
+```
+
+JSONL uses the reward service dependencies. Parquet is optional and additionally
+requires both `pandas` and `pyarrow`:
+
+```bash
+python3 -m pip install pandas pyarrow
+```
+
+## 6. Gotchas
+
+- **Frama-C PATH**: `filter_mode: "positive"` in `/health` means the service is
+  using the lite fallback. `/reward` can still respond, but production rewards
+  are not proof-filtered and `/refine_feedback` returns HTTP 503. Fix the
+  service environment before training.
+- **Prompts are files, not code**: the trainer formats
+  `prompt/generate_prompt.txt`; the service formats `prompt/refine_prompt.txt`;
+  both sides use `prompt/system_prompt.txt`. Do not maintain divergent inline
+  copies.
+- Send the normalized `pool` echoed by `/refine_feedback` unchanged to
+  `/refine_reward`. The reward is meaningful only against the pool the policy
+  actually saw.
 - Keep `sampler.seed`/`n_runs` fixed within a training sweep so the example-set
   cache hits and rewards are comparable across steps.

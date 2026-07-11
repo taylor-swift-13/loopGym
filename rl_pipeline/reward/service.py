@@ -7,7 +7,7 @@ Reward service — Component 2 exposed over HTTP (FastAPI).
   POST /sample           {program, ...}                 -> example-set stats (debug)
   GET  /health
 
-The example set (positives/negatives) is expensive to sample, so it is cached
+The example set (positives/negative candidates) is expensive to sample, so it is cached
 per (program, sampler-config).  Any RL trainer can POST batches here — the two
 refine endpoints make refine-group training turnkey: the trainer never needs a
 local frama-c or an rl_pipeline import.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
@@ -47,27 +47,26 @@ def _get_filter():
 
 
 class SamplerCfg(BaseModel):
-    # Defaults from the SINGLE canonical source in sampler.example_sampler, so the
-    # reward service (training) and the inference framework sample identically.
-    # The sampler sees ONLY the loop: negatives are UNREACHABLE loop-head
-    # valuations (states no execution trace produces), never derived from assert.
-    n_runs: int = DEFAULT_N_RUNS
+    # Defaults come from the canonical sampler source and are shared by the
+    # reward service and offline scorer. Inference performs no reward sampling.
+    # Synthetic negatives derive only from loop traces, never from the assert.
+    n_runs: int = Field(DEFAULT_N_RUNS, ge=1)
     seed: int = DEFAULT_SEED
 
 
 class RewardRequest(BaseModel):
     program: str = Field(..., description="C program source with requires/loop/assert")
     rollouts: List[Any] = Field(..., description="each: {'invariants':[...]} or {'code': '...'}")
-    w_base: float = 0.5
-    w_marg: float = 0.5
-    reroll_threshold: float = 0.6
-    sampler: SamplerCfg = SamplerCfg()
+    w_base: float = Field(0.5, ge=0.0)
+    w_marg: float = Field(0.5, ge=0.0)
+    reroll_threshold: float = Field(0.6, ge=0.0, le=1.0)
+    sampler: SamplerCfg = Field(default_factory=SamplerCfg)
 
 
 class RefineFeedbackRequest(BaseModel):
     program: str = Field(..., description="C program source (full, with assert)")
     pool: List[str] = Field(..., description="merged invariant pool: the union of the group's rollouts")
-    loop_idx: int = 0
+    loop_idx: int = Field(0, ge=0)
     hide_assert: bool = True   # closed-book: the assembled prompt strips the assert
 
 
@@ -75,14 +74,14 @@ class RefineRewardRequest(BaseModel):
     program: str
     pool: List[str] = Field(..., description="the SAME pool the refine prompt showed")
     refinements: List[List[str]] = Field(..., description="one invariant list per sampled refine response")
-    loop_idx: int = 0
-    sampler: SamplerCfg = SamplerCfg()
+    loop_idx: int = Field(0, ge=0)
+    sampler: SamplerCfg = Field(default_factory=SamplerCfg)
 
 
 class SampleRequest(BaseModel):
     program: str
-    sampler: SamplerCfg = SamplerCfg()
-    show: int = 8
+    sampler: SamplerCfg = Field(default_factory=SamplerCfg)
+    show: int = Field(8, ge=0)
 
 
 def _cache_key(program: str, n_runs: int, seed: int) -> str:
@@ -124,7 +123,7 @@ def build_app():
 
     @app.post("/refine_feedback")
     def refine_feedback(req: RefineFeedbackRequest):
-        """Build a refine group's prompt server-side: syntax scrub + ONE WP round
+        """Build a refine group's prompt: syntax scrub + at most two WP rounds
         over the pool -> verdict table -> prompt/refine_prompt.txt assembled.
         `n_rejected == 0` means there is nothing to refine (skip the group)."""
         stage = filters.precheck_stage(_get_filter())
@@ -133,6 +132,10 @@ def build_app():
                                 detail="no WP precheck stage (frama-c unavailable)")
         try:
             prog = parse_program(req.program)
+            if req.loop_idx >= len(prog.loops):
+                raise ValueError(
+                    f"loop_idx {req.loop_idx} is out of range for {len(prog.loops)} loops"
+                )
             pool = dedup_normalized(req.pool)
             verdicts = stage.precheck(prog, req.loop_idx, pool)
             feedback = filters.build_feedback(verdicts)
@@ -168,7 +171,7 @@ def build_app():
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         out = {"program": es.program.func_name, "guard": es.program.loop.guard,
-               "post": es.program.post, "loops": {}}
+               "loops": {}}
         for li in sorted(es.positives):
             out["loops"][li] = {
                 "stats": es.stats.get(li, {}),
@@ -180,11 +183,8 @@ def build_app():
     return app
 
 
-# module-level app for `uvicorn rl_pipeline.reward.service:app`
-try:  # pragma: no cover
-    app = build_app()
-except Exception:  # fastapi missing at import time
-    app = None
+# Module-level app for `uvicorn rl_pipeline.reward.service:app`.
+app = build_app()
 
 
 def _main():

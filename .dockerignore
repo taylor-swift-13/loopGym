@@ -5,11 +5,10 @@
 *.py[cod]
 *.egg-info
 
-# not needed by the reward image
+# Not needed by either image. Each Dockerfile selects its own Python packages.
 paper/
 docs/
 models/
-rl_pipeline/inference/
 src/input/
 src/prompts/
 src/log/

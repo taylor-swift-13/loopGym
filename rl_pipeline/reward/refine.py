@@ -16,10 +16,9 @@ gradient — expected early in training.
 Trivial/copied/weakened refinements get Δ ≈ 0 for free: they must both survive
 Houdini AND reject new negatives to score.
 
-The refine prompt itself is built with the SAME pieces inference uses — import
-`REFINE_PROMPT` / `build_feedback` from rl_pipeline.inference.inference and the
-verdicts from `filters.precheck_stage(filter).precheck(...)` — so the training
-input distribution matches the inference-time m-round refine loop exactly.
+The refine prompt and feedback renderer are shared through
+``rl_pipeline.common.prompts`` and ``reward.filters`` so training and inference
+format the same stateless input.
 """
 from __future__ import annotations
 
@@ -54,7 +53,8 @@ def refine_group_delta_base(
     base_before = res.rollouts[0].base
     base_after = [r.base for r in res.rollouts[1:]]
     return {
-        "delta_base": [after - base_before for after in base_after],
+        # Guard the public delta >= 0 contract against floating-point residue.
+        "delta_base": [max(0.0, after - base_before) for after in base_after],
         "base_before": base_before,
         "base_after": base_after,
         "pool_size": len(pool),

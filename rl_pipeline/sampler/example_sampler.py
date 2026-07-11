@@ -4,45 +4,42 @@ ExampleSampler — Component 1 (minimal).
 The sampler sees ONLY the loop (it executes it) — never the assert/postcondition.
 
 Running the loop from many inputs yields traces of loop-head valuations; their
-union is the REACHABLE set.  Per loop we produce:
+union is the sampled reachable set. We produce:
   * positives : reachable loop-head valuations;
-  * negatives : impossible TRACES (histories the loop cannot produce), stored
-    as WITNESS states grouped in `neg_groups`: a perturbation is a singleton
+  * negatives : synthetic candidate traces designed to depart from sampled
+    behavior, stored as WITNESS states grouped in `neg_groups`: a perturbation
+    is a singleton
     ("real prefix + this state"); an over-run continuation is one group.
     A rollout rejects a history iff some invariant is false at ANY witness.
 
-Three negative families, each with a construction-time unreachability argument:
-  * relation : small perturbations (±1, ±2) off DENSE bases — every in-window
-    reachable neighbor is known, so a surviving perturbation is off-manifold;
-  * over-run : the body executed past a GENUINE exit — real dynamics, out of
-    the reachable range;
+Three negative-candidate families:
+  * relation : small perturbations (±1, ±2) around DENSE sampled bases;
+  * over-run : the body executed past an observed genuine exit;
   * escape   : ladder steps kept only when they leave the variable's sampled
     range.
 
-Truthfulness filters (label correctness — a mislabeled negative punishes
-exactly the true invariants):
+Conservative filters (a reachable state mislabeled as negative would distort
+the tightness signal):
   * states observed reachable are never negatives;
   * states that could be a fresh loop ENTRY under their input are dropped;
-  * nondet-tainted variables are never perturbed; a nondet guard disables the
-    bound families (the loop can always run longer); capped runs disable
-    escapes (the sampled range is then an under-approximation).
+  * nondeterministic guards/bodies disable synthetic negatives (finite oracle
+    runs under-approximate reachability); capped runs disable escapes.
 
 Soundness of scoring is delegated to the reward's filter cascade, which ends
 in real Houdini (Frama-C/WP).
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 import re
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Set, Tuple
 
 from ..common.program import Program, parse_program
 from ..common.state import State, eval_predicate
 from . import cexec
 
-# Canonical sampler defaults — the SINGLE source of truth shared by BOTH the
-# reward service (training) and the inference framework.
+# Canonical sampler defaults shared by reward-service and offline-scoring paths.
+# Inference deliberately does not construct reward examples.
 DEFAULT_N_RUNS = 12
 DEFAULT_SEED = 0
 
@@ -60,7 +57,7 @@ class ExampleSet:
     program: Program
     positives: Dict[int, List[State]] = field(default_factory=dict)
     negatives: Dict[int, List[State]] = field(default_factory=dict)
-    # witness-state indices per impossible trace (see module docstring)
+    # witness-state indices per synthetic trace unit (see module docstring)
     neg_groups: Dict[int, List[List[int]]] = field(default_factory=dict)
     stats: Dict[int, dict] = field(default_factory=dict)
 
@@ -83,19 +80,19 @@ class ExampleSampler:
         source: str,
         n_runs: int = DEFAULT_N_RUNS,
         seed: int = DEFAULT_SEED,
-        logger: Optional[logging.Logger] = None,
     ):
         self.source = source
         self.n_runs = n_runs
         self.seed = seed
-        self.log = logger or logging.getLogger("rl_pipeline.sampler")
 
     # ── positives ────────────────────────────────────────────────────────────
     @staticmethod
     def _dedup(states: List[State]) -> List[State]:
         seen, out = set(), []
         for s in states:
-            k = s.vars_key()
+            # Pre-values are semantic inputs to \at(v,Pre) predicates.  The same
+            # loop-head valuation reached from two inputs must retain both pairs.
+            k = s.key()
             if k not in seen:
                 seen.add(k)
                 out.append(s)
@@ -267,6 +264,35 @@ class ExampleSampler:
         body = prog.source[loop.body_open + 1: loop.body_close]
         return bool(re.search(r"\bunknown\w*\s*\(", body))
 
+    @classmethod
+    def _untracked_body_state(cls, prog: Program, loop_idx: int = 0) -> Set[str]:
+        """Names assigned in the body but absent from the loop-head valuation.
+
+        This includes block-local temporaries and unsupported state shapes. A
+        projected trace is not a complete transition state in that case, so
+        finite perturbations cannot safely be labeled as negatives.
+        """
+        loop = prog.loops[loop_idx]
+        body = prog.source[loop.body_open + 1:loop.body_close]
+        return cls._assigned_names(body) - set(prog.pre_vars)
+
+    @staticmethod
+    def _body_calls_function(prog: Program, loop_idx: int = 0) -> bool:
+        loop = prog.loops[loop_idx]
+        body = prog.source[loop.body_open + 1:loop.body_close]
+        calls = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", body))
+        return bool(calls - {"if", "while", "for", "switch", "sizeof"})
+
+    @staticmethod
+    def _body_has_unsupported_state(prog: Program, loop_idx: int = 0) -> bool:
+        loop = prog.loops[loop_idx]
+        body = prog.source[loop.body_open + 1:loop.body_close]
+        return bool(re.search(
+            r"\b(?:unsigned\s+|signed\s+)?(?:int|long|short)\s+"
+            r"[^;{}]*(?:\*|\[)",
+            body,
+        ))
+
     @staticmethod
     def _bases(positives: List[State]) -> List[State]:
         """Stratified subsample across ALL positives."""
@@ -298,17 +324,11 @@ class ExampleSampler:
         return feasible
 
     def _relation_negatives(self, movable: List[str], bases: List[State],
-                            dense_index: Set[Tuple[int, int]],
-                            novel_only: Optional[Dict[str, Set[int]]] = None) -> List[State]:
+                            dense_index: Set[Tuple[int, int]]) -> List[State]:
         """Small single-axis + pairwise steps from DENSE bases (next
         `_DENSE_WINDOW` trace states sampled, so a surviving perturbation is
-        genuinely off-manifold).  `novel_only` applies for nondeterministic
-        bodies: keep only perturbations giving some variable a never-observed
-        value."""
+        genuinely off-manifold)."""
         out: List[State] = []
-
-        def novel(v: str, val: int) -> bool:
-            return novel_only is None or val not in novel_only.get(v, set())
 
         for r in bases:
             if r.run >= 0 and not all(
@@ -318,25 +338,24 @@ class ExampleSampler:
             base = r.vars
             for v in movable:
                 for d in _SMALL_DELTAS:
-                    if not novel(v, base[v] + d):
-                        continue
-                    nv = dict(base); nv[v] = nv[v] + d
+                    nv = dict(base)
+                    nv[v] += d
                     out.append(State(vars=nv, pre=dict(r.pre)))
             for i in range(len(movable)):
                 for j in range(i + 1, len(movable)):
                     u, w = movable[i], movable[j]
                     for d in _SMALL_DELTAS:
                         for su, sw in ((d, d), (d, -d)):
-                            if not (novel(u, base[u] + su) or novel(w, base[w] + sw)):
-                                continue
-                            nv = dict(base); nv[u] += su; nv[w] += sw
+                            nv = dict(base)
+                            nv[u] += su
+                            nv[w] += sw
                             out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
     def _escape_negatives(self, movable: List[str], bases: List[State],
                           positives: List[State]) -> List[State]:
         """Ladder steps kept only when they leave the variable's sampled range
-        (full traces run to the genuine exit, so escapees are unreachable)."""
+        so they probe range facts outside the observed envelope."""
         lo = {v: min(p.vars[v] for p in positives) for v in movable}
         hi = {v: max(p.vars[v] for p in positives) for v in movable}
         out: List[State] = []
@@ -347,7 +366,8 @@ class ExampleSampler:
                     nv_val = base[v] + d
                     if lo[v] <= nv_val <= hi[v]:
                         continue
-                    nv = dict(base); nv[v] = nv_val
+                    nv = dict(base)
+                    nv[v] = nv_val
                     out.append(State(vars=nv, pre=dict(r.pre)))
         return out
 
@@ -374,6 +394,9 @@ class ExampleSampler:
             return out
 
         nondet_body = self._body_nondeterministic(prog, 0)
+        untracked = self._untracked_body_state(prog, 0)
+        body_call = self._body_calls_function(prog, 0)
+        unsupported_state = self._body_has_unsupported_state(prog, 0)
         tainted = self._nondet_tainted(prog, 0)
         guard = prog.loops[0].guard or ""
         nondet = (self._guard_nondeterministic(prog, 0)
@@ -381,15 +404,18 @@ class ExampleSampler:
         dense_index = {(s.run, s.it) for s in raw_reach if s.run >= 0}
         bases = self._bases(positives)
         movable = [v for v in movable if v not in tainted]
-        novel_only = None
-        if nondet_body:
-            novel_only = {v: {p.vars[v] for p in positives} for v in movable}
+
+        # Incomplete transition state/control makes projected perturbations
+        # unreliable. Degrade to no synthetic negatives in that case.
+        uncontrolled = (
+            nondet or nondet_body or bool(untracked) or body_call or unsupported_state
+        )
 
         # bound families: over-run (one group per continuation) + ladder escapes
         bound: List[State] = []
         bound_groups: List[List[int]] = []
         n_over_traces = n_escape = 0
-        if not nondet:
+        if not uncontrolled:
             by_run: Dict[int, List[State]] = {}
             for s in keep(overrun):
                 by_run.setdefault(s.run, []).append(s)
@@ -406,7 +432,9 @@ class ExampleSampler:
                     bound.append(s)
                     n_escape += 1
 
-        relation = keep(self._relation_negatives(movable, bases, dense_index, novel_only))
+        relation = [] if uncontrolled else keep(
+            self._relation_negatives(movable, bases, dense_index)
+        )
 
         negatives = bound + relation
         groups = bound_groups + [[len(bound) + i] for i in range(len(relation))]
@@ -418,6 +446,10 @@ class ExampleSampler:
             "bound_escape": n_escape,
             "capped": capped,
             "nondet_guard": nondet,
+            "nondet_body": nondet_body,
+            "untracked_state": sorted(untracked),
+            "body_call": body_call,
+            "unsupported_state": unsupported_state,
         }
         return negatives, groups, stats
 
@@ -425,26 +457,28 @@ class ExampleSampler:
     def sample(self) -> ExampleSet:
         prog = parse_program(self.source)
         es = ExampleSet(program=prog)
-        for loop_idx in range(len(prog.loops)):
-            runs = self.n_runs * 2 if self._body_nondeterministic(prog, loop_idx) else self.n_runs
-            reach, overrun, capped = cexec.collect_traces(
-                prog, loop_idx=loop_idx, n_runs=runs, seed=self.seed)
-            positives = self._dedup(reach)
-            es.positives[loop_idx] = positives
-            if loop_idx == 0:
-                negatives, groups, stats = self._negatives(prog, positives, overrun, reach, capped)
-                es.negatives[loop_idx] = negatives
-                es.neg_groups[loop_idx] = groups
-                es.stats[loop_idx] = {"n_pos": len(positives), "n_neg": len(groups), **stats}
-            else:
-                es.negatives[loop_idx] = []
-                es.neg_groups[loop_idx] = []
-                es.stats[loop_idx] = {"n_pos": len(positives), "n_neg": 0}
+        runs = self.n_runs * 2 if self._body_nondeterministic(prog, 0) else self.n_runs
+        reach, overrun, capped = cexec.collect_traces(
+            prog, loop_idx=0, n_runs=runs, seed=self.seed
+        )
+        positives = self._dedup(reach)
+        negatives, groups, stats = self._negatives(
+            prog, positives, overrun, reach, capped
+        )
+        es.positives[0] = positives
+        es.negatives[0] = negatives
+        es.neg_groups[0] = groups
+        es.stats[0] = {
+            "n_pos": len(positives),
+            "n_neg": len(groups),
+            **stats,
+        }
         return es
 
 
 def _cli():
     import argparse
+    import logging
 
     ap = argparse.ArgumentParser(description="Sample positive/negative loop-entry valuations")
     ap.add_argument("program", help="path to a C program")

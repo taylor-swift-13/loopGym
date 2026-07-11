@@ -1,6 +1,6 @@
 %%
 %% LoopGym: Invariants without Targets — Learning Inductive Loop Summaries
-%%          with Execution-Grounded, Hack-Resistant Rewards
+%%          with Execution-Grounded, Audited Rewards
 %% NeurIPS 2024 Format
 %%
 \documentclass[11pt]{article}
@@ -28,7 +28,6 @@
 \usepackage{float}
 \usepackage{tikz}
 \usetikzlibrary{calc,arrows.meta,positioning}
-\usepackage[normalem]{ulem}
 
 %% tcolorbox setup
 \tcbuselibrary{skins,breakable}
@@ -165,7 +164,7 @@
 \newcommand{\sam}{\textsc{LoopGym}}
 
 %% Meta
-\title{Invariants without Targets: Learning Inductive Loop Summaries\\with Execution-Grounded, Hack-Resistant Rewards}
+\title{Invariants without Targets: Learning Inductive Loop Summaries\\with Execution-Grounded, Audited Rewards}
 
 \author{
   Anonymous Author(s)\\
@@ -181,9 +180,9 @@
 Loop invariant generation is a central challenge in program verification, and four decades of work---abstract interpretation, constraint solving, data-driven learning, and most recently large language models---have framed it almost uniformly as a \emph{target-directed} task: given a program \emph{and a verification target} (a postcondition or assertion), find an inductive invariant strong enough to discharge the target.
 We argue that this framing rests on a circularity that limits practical impact: verification targets are scarce in real code, writing them is itself the specification bottleneck, and for loop programs the target is typically nothing but the projection of an invariant at loop exit ($I \wedge \neg B \Rightarrow Q$)---whoever wrote $Q$ had already done the invariant reasoning.
 We therefore reframe the task as generating an \emph{inductive loop summary}: the strongest practically expressible inductive invariant that characterizes a loop's reachable states, synthesized \emph{closed-book}, with no postcondition visible to the generator.
-Removing the target removes the binary verifier signal that prior learning approaches optimize, so we develop an execution-grounded dense reward suitable for reinforcement learning: candidate invariants are first reduced to an inductive subset by Houdini-style pruning, then scored by the fraction of \emph{truthful negatives}---trace units that are provably impossible under the loop's dynamics, constructed along a relational dimension and a bound dimension---that the surviving subset rejects.
-Because such a reward is a natural target for reward hacking, we harden it with a complexity gate, a per-rollout atom budget, unique-kill junk discounting, and multi-seed minimum scoring against held-out sampling seeds backed by seed-hashed far probes and tier jitter, making memorization and predicate-spraying strictly dominated by genuine invariants.
-The result, \sam{}, is an open three-component pipeline---sampler, reward service, and inference framework---in which the reward passes three adversarial validation gates (discrimination, hack sweep, and mislabel audit) with zero violations over 366 linear and nonlinear benchmark programs, and generated summaries are certified end-to-end by Frama-C/WP.
+Removing the target removes the binary verifier signal that prior learning approaches optimize, so we develop an execution-grounded dense reward suitable for reinforcement learning.  Its sampler constructs three families of synthetic negative candidates---dense-neighborhood relational perturbations, genuine-exit over-run continuations, and sampled-range escapes---and conservatively suppresses candidates contradicted by sampled reachability, fresh-entry feasibility, or incomplete state/control coverage.
+Candidate invariants are reduced by an always-on cascade ending in Houdini-style Frama-C/WP pruning.  For each rollout, the complete generation reward is an equal-weighted sum of its standalone negative rejection rate and its marginal contribution to the group union, with no auxiliary scoring terms.
+The result, \sam{}, is an open three-component pipeline---sampler, reward service, and inference framework.  The current discrimination regression covers 10 deterministic programs, while a full-suite audit compared 486,302 sampled negative witnesses across 366 linear and nonlinear programs with larger reachable-state samples and found zero hard mislabels.
 \end{abstract}
 
 %% ============================================================

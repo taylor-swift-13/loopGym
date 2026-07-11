@@ -25,15 +25,9 @@ class LLMConfig:
     api_top_p: float = 1.0
     api_max_tokens: int = 16384
 
-    # single fixed system prompt (no CoT variant)
-    system_prompt_file: str = "system_prompt.txt"
-
-
 # ==============================================================================
 # Houdini configuration (used by src/houdini_pruner.py)
 # ==============================================================================
 HOUDINI_CONFIG = {
-    'enabled': True,
-    'max_iterations': 500,   # safety upper bound (≈ number of invariants)
-    'patience': 2,           # no-progress rounds before giving up (guards a Houdini bug)
+    "max_iterations": 500,
 }

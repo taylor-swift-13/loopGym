@@ -1,1 +1,1 @@
-"""Evaluation harnesses for the RL pipeline (reward discrimination / anti-hack)."""
+"""Reward-discrimination and sampler-mislabel regression harnesses."""

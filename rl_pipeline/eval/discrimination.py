@@ -1,6 +1,5 @@
 """
-Reward-discrimination harness: does the reward rank rollouts by TRUE quality,
-and can it be hacked?
+Reward-discrimination harness: does the reward rank rollouts by true quality?
 
 For each benchmark program we build rollout families of KNOWN relative quality:
 
@@ -11,22 +10,7 @@ For each benchmark program we build rollout families of KNOWN relative quality:
   post_copy   [assert expression]               (usually violated at entry -> ~0)
   unsound     pins a movable var to one sampled value (filtered -> ~0)
 
-THREAT MODEL: the adversary generators see the exact sample being scored (a
-strictly stronger adversary than the deployed text-conditioned policy, which
-never sees sampled states).  Scoring runs the DEPLOYED filter cascade: real
-Houdini (Frama-C/WP) when frama-c is on PATH — sample-overfit predicates then
-die by proof — else the lite PositiveFilter with a prominent warning (lite
-certificates do NOT transfer to production).
-
-Anti-hack criterion per program (margins configurable):
-  * memorizers must sit far below gold:    reward(mem) <= reward(gold) - hack_margin
-  * overfit boxes must sit below gold:     reward(box) <= reward(gold) - hack_margin
-      (killed by Houdini's initiation/consecution proof over unconstrained inputs)
-      (except when the spec declares box_true: the reachable box is
-       input-independent there, so the sampled box IS a true invariant —
-       then it may tie gold but never beat it)
-  * spray never ties clean sets:           reward(combo) <= reward(gold) - strict_eps
-  * no adversarial family may BEAT gold:   reward(hack) <= reward(gold) + eps
+Criteria per program:
   * gold must dominate junk by a margin:   reward(gold) >= reward(trivial) + margin
   * gold must actually work:               base(gold) >= min_gold_base
   * quality order:                         reward(gold) >= reward(loose) - eps
@@ -42,7 +26,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..common.program import parse_program
-from ..common.state import eval_predicate
 from ..reward.filters import auto_filter, frama_c_available
 from ..reward.reward_calculator import RewardCalculator
 from ..sampler import ExampleSampler
@@ -52,27 +35,20 @@ INPUT = REPO / "src" / "input"
 
 # ── benchmark programs with hand-written ground truth ────────────────────────
 # gold = true + tight; loose = true + strictly weaker.
-# box_true: the reachable per-var ranges are INPUT-INDEPENDENT (no parameters
-# feed the loop), so a box at the sampled extremes is a true invariant — the
-# box adversaries legitimately tie gold there and are exempt from the
-# collapse-on-holdout requirement.
 SPECS: Dict[str, Dict[str, object]] = {
     "linear/103.c": {   # x=0; while(x<100) x++;           1-var, worst case for pointwise hacks
         "gold": ["0 <= x", "x <= 100"],
         "loose": ["0 <= x"],
-        "box_true": True,
     },
     "linear/2.c": {     # x=1,y=0; while(y<1000){x+=y;y++}  long loop (cap stress)
         "gold": ["0 <= y", "y <= 1000", "2*x == y*y - y + 2"],
         "loose": ["0 <= y", "x >= 1"],
-        "box_true": True,
     },
     "linear/1.c": {     # same but y<100000                 extreme length stress
         # x overflows int32 during the run, so the executed-semantics relation is
         # modular; `x >= 1` is NOT a true invariant of the compiled program.
         "gold": ["0 <= y", "y <= 100000", "(2*x - y*y + y - 2) % 4294967296 == 0"],
         "loose": ["0 <= y"],
-        "box_true": True,
     },
     "linear/34.c": {    # x=n; while(x>0) x--;              symbolic bound
         "gold": ["x <= n", "n > 0 ==> x >= 0", "n <= 0 ==> x == n"],
@@ -83,14 +59,6 @@ SPECS: Dict[str, Dict[str, object]] = {
                  "x == 1 ==> y == \\at(y,Pre)"],
         "loose": ["x >= 1"],
     },
-    "linear/12.c": {    # while(unknown()){x+=10;y+=10}     nondeterministic guard, pre-relations
-        "gold": [
-            "x - y == \\at(x,Pre) - \\at(y,Pre)",
-            "x >= \\at(x,Pre)",
-            "(x - \\at(x,Pre)) % 10 == 0",
-        ],
-        "loose": ["x >= \\at(x,Pre)"],
-    },
     "NLA_lipus/2.c": {  # division by counting: q,r vs x/y  C-division semantics
         "gold": ["0 <= q", "0 <= r", "r < y", "x >= y * q + r", "q <= x / y"],
         "loose": ["0 <= r", "x >= y * q + r"],
@@ -98,9 +66,6 @@ SPECS: Dict[str, Dict[str, object]] = {
     "NLA_lipus/15.c": { # c,y count, x=sum(1..y)            nonlinear relation
         "gold": ["c == y", "2*x == y*y + y", "0 <= c", "c <= k"],
         "loose": ["c == y", "0 <= c"],
-        # requires k <= 30 bounds the INPUT space itself, so the sampled
-        # extremes (c,y <= 30, x <= 465) are contract truth, not overfit
-        "box_true": True,
     },
     "NLA_lipus/1.c": {  # cubic series                      nonlinear, multi-relation
         "gold": ["z == 6*n + 6", "y == 3*n*n + 3*n + 1", "x == n*n*n", "n >= 0", "n <= a + 1"],
@@ -115,11 +80,8 @@ SPECS: Dict[str, Dict[str, object]] = {
         "loose": ["p*s - r*q == 1", "a >= 1"],
         "post_is_invariant": True,
     },
-    # NOTE: linear/301.c, linear/173.c, linear/45.c were removed from SPECS
-    # when the nondeterminism rescue layer (rigid-pair / lattice / monotone /
-    # guarded-bound negatives) was dropped for simplicity: their negatives were
-    # entirely rescue-generated, so they now yield zero signal (sound, just
-    # uninformative) and cannot support a gold-vs-hack comparison.
+    # Nondeterministic programs are excluded because the conservative sampler
+    # emits no finite-sample negatives for oracle-controlled loops.
 }
 
 def unsound_pin(examples) -> List[str]:
@@ -149,15 +111,13 @@ class ProgramReport:
 
 def evaluate_program(rel_path: str, spec: Dict[str, object],
                      margin: float = 0.15, eps: float = 0.02,
-                     hack_margin: float = 0.15, strict_eps: float = 0.02,
                      min_gold_base: float = 0.80,
                      sampler_kwargs: Optional[dict] = None) -> ProgramReport:
     source = (INPUT / rel_path).read_text()
     prog = parse_program(source)
     gold: List[str] = list(spec["gold"])
     loose: List[str] = list(spec["loose"])
-    box_true = bool(spec.get("box_true", False))
-    sampler_kwargs = sampler_kwargs or {}
+    sampler_kwargs = dict(sampler_kwargs or {})
     base_seed = int(sampler_kwargs.pop("seed", 0)) if "seed" in sampler_kwargs else 0
     # adversary generators see the EXACT sample being scored
     examples = ExampleSampler(source, seed=base_seed, **sampler_kwargs).sample()

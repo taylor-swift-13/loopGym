@@ -1,7 +1,7 @@
 """
-Mislabel audit: a negative that is actually REACHABLE poisons the reward (it
-punishes exactly the true invariants).  For every benchmark program, sample
-negatives at the canonical config and check them against the positives of a
+Mislabel audit: a negative candidate that is observed REACHABLE corrupts the
+tightness denominator and is a hard label error. For every benchmark program,
+sample candidates at the canonical config and check them against positives of a
 LARGER sample (same seed, more runs — the input prefix is identical, so
 pair-level overlap is a genuine mislabel; extra runs only widen coverage).
 
@@ -52,12 +52,18 @@ def _worker(args):
 
 
 def main() -> int:
+    from ..sampler.example_sampler import DEFAULT_N_RUNS
+
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--base-runs", type=int, default=12)
-    ap.add_argument("--audit-runs", type=int, default=24)
+    ap.add_argument("--base-runs", type=int, default=DEFAULT_N_RUNS)
+    ap.add_argument("--audit-runs", type=int, default=DEFAULT_N_RUNS * 2)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
+    if args.base_runs < 1 or args.audit_runs < args.base_runs:
+        ap.error("require 1 <= base-runs <= audit-runs")
+    if args.jobs < 1:
+        ap.error("jobs must be at least 1")
 
     programs = sorted(
         str(p.relative_to(INPUT))
@@ -87,7 +93,7 @@ def main() -> int:
             print(f"  ERR {r['program']}: {r['error']}")
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=2))
-    return 1 if bad else 0
+    return 1 if bad or errs else 0
 
 
 if __name__ == "__main__":

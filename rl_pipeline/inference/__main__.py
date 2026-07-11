@@ -1,12 +1,10 @@
-"""Testing entrypoint: deploy a trained model to vLLM and run inference.
+"""Deploy a trained model to vLLM and run certified inference.
 
     python -m rl_pipeline.inference --model <hf-or-local> \
         --inputs 'src/input/NLA_lipus/*.c' --n-rollouts 8 --output results.jsonl
 
-Shares the SAME sampler as the reward service (via InferenceFramework →
-ExampleSampler).  Frama-C (bundled in the inference image) makes `verified` real:
-each program is sample → generate (vLLM) → positive-filter → combine → Houdini →
-Frama-C/WP verify.
+Inference does not sample reward examples.  It generates with vLLM, optionally
+refines the merged pool, then runs Houdini and Frama-C/WP verification.
 """
 from __future__ import annotations
 
@@ -37,6 +35,10 @@ def main():
     ap.add_argument("--inputs", nargs="+", required=True, help="dirs / globs / files of .c programs")
     ap.add_argument("--n-rollouts", type=int, default=8)
     ap.add_argument("--max-rerolls", type=int, default=1)
+    ap.add_argument("--m-refine", type=int, default=0,
+                    help="maximum verifier-feedback refinement rounds")
+    ap.add_argument("--refine-samples", type=int, default=1,
+                    help="model samples requested in each refinement round")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=2048)
@@ -58,13 +60,20 @@ def main():
     for i, path in enumerate(files):
         src = open(path).read()
         fw = InferenceFramework(src, rollout_provider=provider,
-                                n_rollouts=args.n_rollouts, max_rerolls=args.max_rerolls)
+                                n_rollouts=args.n_rollouts, max_rerolls=args.max_rerolls,
+                                m_refine=args.m_refine, refine_samples=args.refine_samples)
         res = fw.run()
         verified += int(res.verified is True)
-        rows.append({"program": os.path.basename(path), "verified": res.verified,
-                     "batch_score": res.batch_score, "invariants": res.final_invariants})
-        logging.info("[%d/%d] %s  verified=%s  score=%s",
-                     i + 1, len(files), os.path.basename(path), res.verified, res.batch_score)
+        rows.append({
+            "program": os.path.basename(path),
+            "verified": res.verified,
+            "invariants": res.final_invariants,
+            "reroll_count": res.reroll_count,
+            "refine_rounds": res.refine_rounds,
+        })
+        logging.info("[%d/%d] %s  verified=%s  refinements=%d",
+                     i + 1, len(files), os.path.basename(path),
+                     res.verified, res.refine_rounds)
 
     print(f"\nverified {verified}/{len(files)} (Frama-C/WP)")
     if args.output:

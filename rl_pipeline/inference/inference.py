@@ -1,14 +1,7 @@
-"""
-InferenceFramework — Component 3.
+"""Closed-book generation, optional refinement, Houdini pruning, and verification.
 
-The generation loop:  sample rollouts -> positive-filter -> combine -> Houdini -> verify.
-
-It collaborates with the other two components:
-  * ExampleSampler (Component 1) supplies the positive states for the fast filter
-    (and, reused, the negatives for scoring).
-  * RewardCalculator (Component 2) scores the batch and drives the re-roll decision.
-
-Rollouts come from a swappable provider:
+Inference is independent of reward sampling and scoring.  Rollouts come from a
+swappable provider:
   * LLMRolloutProvider  — queries an LLM (src/llm.Chatbot) for ACSL invariants.
   * MockRolloutProvider — fixed invariant sets (for tests / offline runs).
 """
@@ -52,13 +45,6 @@ class MockRolloutProvider:
         return out
 
 
-# All prompt text lives in <repo-root>/prompt/*.txt (edit there, not here).
-# REFINE_PROMPT is stateless by design — see common/prompts.py.
-_PROMPT = prompts.GENERATE_PROMPT
-REFINE_PROMPT = prompts.REFINE_PROMPT
-build_feedback = filters.build_feedback     # re-export (training side imports it here)
-
-
 class LLMRolloutProvider:
     """Queries an LLM for invariants. `chat_fn` maps a prompt string -> response string.
 
@@ -76,26 +62,23 @@ class LLMRolloutProvider:
 
     @staticmethod
     def _default_chat_fn() -> Callable[[str], str]:
-        from ..common import paths
-        paths.ensure_src_on_path()
-        from llm import Chatbot  # type: ignore
-        try:
-            from config import LLMConfig  # type: ignore
-            cfg = LLMConfig()
-        except Exception:
-            from llm import LLMConfig  # type: ignore
-            cfg = LLMConfig()
+        from src.config import LLMConfig
+        from src.llm import Chatbot
+
+        cfg = LLMConfig()
         bot = Chatbot(cfg)
         return bot.chat
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         # closed-book: hide the assert (goal) so the model can't restate it
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        return self._chat_n(_PROMPT.format(program=source), n)
+        return self._chat_n(prompts.GENERATE_PROMPT.format(program=source), n)
 
     def refine(self, prog: Program, feedback: str, n: int = 1) -> List[List[str]]:
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        return self._chat_n(REFINE_PROMPT.format(program=source, feedback=feedback), n)
+        return self._chat_n(
+            prompts.REFINE_PROMPT.format(program=source, feedback=feedback), n
+        )
 
     def _chat_n(self, prompt: str, n: int) -> List[List[str]]:
         out: List[List[str]] = []
@@ -107,10 +90,6 @@ class LLMRolloutProvider:
                 resp = ""
             out.append(extract_invariants(resp))
         return out
-
-
-def _load_system_prompt() -> str:
-    return prompts.system_prompt()
 
 
 class VLLMRolloutProvider:
@@ -131,16 +110,18 @@ class VLLMRolloutProvider:
         from vllm import LLM, SamplingParams  # optional dependency
         self._SamplingParams = SamplingParams
         self.llm = llm if llm is not None else LLM(model=model, **llm_kwargs)
-        self.system_prompt = _load_system_prompt()
+        self.system_prompt = prompts.system_prompt()
         self.temperature, self.top_p, self.max_tokens = temperature, top_p, max_tokens
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        return self._chat_n(_PROMPT.format(program=source), n)
+        return self._chat_n(prompts.GENERATE_PROMPT.format(program=source), n)
 
     def refine(self, prog: Program, feedback: str, n: int = 1) -> List[List[str]]:
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        return self._chat_n(REFINE_PROMPT.format(program=source, feedback=feedback), n)
+        return self._chat_n(
+            prompts.REFINE_PROMPT.format(program=source, feedback=feedback), n
+        )
 
     def _chat_n(self, prompt: str, n: int) -> List[List[str]]:
         messages = [{"role": "user", "content": prompt}]
@@ -164,11 +145,9 @@ class InferenceResult:
     final_invariants: List[str]
     annotated_code: str
     verified: Optional[bool]
-    batch_score: Optional[float]
     reroll_count: int
     n_rollouts: int
     rollouts: List[List[str]] = field(default_factory=list)
-    filtered_rollouts: List[List[str]] = field(default_factory=list)
     refine_rounds: int = 0        # LLM refine rounds actually run (<= m_refine)
 
 
@@ -194,7 +173,6 @@ class InferenceFramework:
         refine_samples: int = 1,
         logger: Optional[logging.Logger] = None,
     ):
-        self.source = source
         self.prog = parse_program(source)
         # hide_assert applies to the DEFAULT provider; a passed-in provider keeps
         # its own setting (set hide_assert on it directly).
@@ -205,15 +183,19 @@ class InferenceFramework:
         self.m_refine = m_refine
         self.refine_samples = refine_samples
         self.log = logger or logging.getLogger("rl_pipeline.inference")
+        if self.n_rollouts < 1:
+            raise ValueError("n_rollouts must be at least 1")
+        if self.max_rerolls < 0 or self.m_refine < 0:
+            raise ValueError("max_rerolls and m_refine must be non-negative")
+        if self.refine_samples < 1:
+            raise ValueError("refine_samples must be at least 1")
 
     def _verify(self, annotated_code: str) -> Optional[bool]:
         """Frama-C verify the final annotated code (None if frama-c unavailable)."""
         if not filters.frama_c_available():
             return None
-        from ..common import paths
-        paths.ensure_src_on_path()
         try:
-            from output_verify import OutputVerifier  # type: ignore
+            from src.output_verify import OutputVerifier
         except Exception:
             return None
         tmpdir = tempfile.mkdtemp(prefix="rlinfer_")
@@ -225,8 +207,8 @@ class InferenceFramework:
             v.run(cpath)
             syntax = getattr(v, "syntax_correct", False) or getattr(v, "syntax_error", "") == "syntax Correct"
             valid = bool(v.validate_result) and all(v.validate_result)
-            has_assert = "assert" in annotated_code
-            satisfy = (all(v.verify_result) if v.verify_result else False) or not has_assert
+            has_target = bool(self.prog.post)
+            satisfy = bool(v.verify_result) and all(v.verify_result) if has_target else True
             return bool(syntax and valid and satisfy)
         except Exception as e:
             self.log.warning("verify failed: %s", e)
@@ -235,7 +217,7 @@ class InferenceFramework:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _refine_loop(self, pool: List[str], loop_idx: int) -> tuple:
-        """m rounds of: WP precheck (syntax + ONE WP pass) -> verdict feedback ->
+        """m rounds of: WP precheck (syntax + at most two WP passes) -> feedback ->
         LLM refine -> refined candidates join the pool (originals kept: a later
         companion can rescue an iron reject; the final full Houdini adjudicates).
         Stops early when nothing is rejected or the pool reaches a fixpoint."""
@@ -256,7 +238,7 @@ class InferenceFramework:
             verdicts = stage.precheck(self.prog, loop_idx, pool)
             if not any(not v.kept for v in verdicts):
                 break                                  # nothing to refine
-            feedback = build_feedback(verdicts)
+            feedback = filters.build_feedback(verdicts)
             refined = refine_fn(self.prog, feedback, self.refine_samples)
             rounds += 1
             new_pool = dedup_normalized(list(pool) + [c for r in refined for c in r])
@@ -283,25 +265,26 @@ class InferenceFramework:
             final_invariants=survivors,
             annotated_code=annotated,
             verified=verified,
-            batch_score=None,
             reroll_count=0,
             n_rollouts=self.n_rollouts,
             rollouts=rollouts,
-            filtered_rollouts=None,
             refine_rounds=refine_rounds,
         )
 
     def run(self) -> InferenceResult:
         best: Optional[InferenceResult] = None
+        rerolls = 0
         for attempt in range(self.max_rerolls + 1):
             res = self._attempt()
-            res.reroll_count = attempt
+            rerolls = attempt
             if best is None or _better(res, best):
                 best = res
             if res.verified is True:
                 break
             if attempt < self.max_rerolls:
                 self.log.info("re-rolling (attempt %d, verified=%s)", attempt + 1, res.verified)
+        assert best is not None
+        best.reroll_count = rerolls
         return best
 
 

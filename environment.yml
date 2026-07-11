@@ -1,4 +1,4 @@
-name: sam2inv
+name: loopgym
 channels:
   - defaults
   - conda-forge
@@ -12,7 +12,8 @@ dependencies:
       - accelerate
       - openai
       - numpy
-      - pyyaml
+      - pandas
+      - pyarrow
       - z3-solver
       - fastapi
       - uvicorn

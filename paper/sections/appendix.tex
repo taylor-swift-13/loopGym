@@ -2,71 +2,67 @@
 %% Appendix (included after \appendix in main.tex)
 %% ============================================================
 
-\section{Sampler and Reward Constants}
+\section{Canonical Component Defaults}
 \label{app:constants}
 
-Table~\ref{tab:constants} lists the canonical configuration shared by training (reward service) and inference, so that the reward optimized during RL is exactly the quantity measured at deployment.
+Table~\ref{tab:constants} lists the implemented defaults.  Sampling belongs only to reward construction during training; inference has its own refinement budget and never constructs an example set.
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{llp{6.2cm}}
+\begin{tabular}{lp{3.2cm}p{6.2cm}}
 \toprule
 \textbf{Constant} & \textbf{Value} & \textbf{Role} \\
 \midrule
-runs per seed & 12 & concrete executions per example set \\
-input tiers & 20 tiers, clamped to $[-64, 64]$ & deterministic magnitude schedule (edges first) \\
-far probes & 3 per seed, magnitude $\le 512$ & seed-hashed envelope decorrelation; cube-safe \\
-tier jitter & $\pm 2$ on non-edge tiers & seed-hashed value decorrelation \\
-relation deltas & $\pm\{1,2,3\}$ & small perturbations off dense bases \\
-dense window & 4 & successors required for a base to be ``dense'' \\
-escape ladder & $\pm\{5,8,13,21,34,55,89\}$ & box-escape bound negatives \\
+runs requested & 12 & input executions; deterministic no-input programs collapse to one, and oracle-body sampling doubles the request \\
+sampler seed & 0 & one canonical example set per reward request unless overridden \\
+input tiers & 20 values in $[-64, 64]$ & deterministic edge-first magnitude schedule \\
+far probes & 3, plus 2 ordered multi-parameter probes & seed-hashed input-envelope coverage, magnitude $\le 512$ \\
+relation deltas & $\pm\{1,2\}$ & single-axis and pairwise perturbations off dense bases \\
+dense window & 3 & sampled successors required for a relation base \\
+relation base cap & 96 & bases stratified across positives \\
+escape ladder & $\pm\{5,8,13,21,34\}$ & candidates kept only outside the sampled range \\
 over-run steps & 24 & post-exit continuation length (one trace unit per run) \\
 iteration cap & $2 \times 10^6$ & divergence safety net (capped runs flagged) \\
-slice cap & 6 & max units per farm-targetable coordinate value \\
-relation:bound & $\le 2:1$ & dimension balancing \\
 \midrule
-complexity gate & 160 chars / 12 atoms & per-clause capacity limit (drop, not truncate) \\
-rollout atom budget & 32 & total atoms scored per rollout (prefix) \\
 $(w_b, w_m)$ & $(0.5, 0.5)$ & base / marginal weights (\S\ref{sec:method:reward}) \\
-seeds / holdout & 2 / 1 & minimum-combined example sets \\
 re-roll threshold & 0.6 & group batch score below which re-rolling is advised \\
-positive subsample & 4096 & per-set cap; per-variable extremes always retained \\
 \midrule
-Houdini iterations & $\le 500$, patience 2 & greatest-inductive-subset pruning \\
+Houdini iterations & $\le 500$ & greatest-inductive-subset pruning \\
 WP configuration & Z3, 30\,s, Typed model & per-goal prover budget \\
+$m_{\mathrm{refine}}$ & 0 & inference refinement disabled by default; any nonnegative round budget is supported \\
 \bottomrule
 \end{tabular}
-\caption{Canonical constants of the sampler ($\S$\ref{sec:method:sampler}), reward ($\S$\ref{sec:method:reward}--$\S$\ref{sec:method:reward}), and verification backend.}
+\caption{Implemented defaults of the sampler ($\S$\ref{sec:method:sampler}), reward ($\S$\ref{sec:method:reward}), inference, and verification backend.}
 \label{tab:constants}
 \end{table}
 
 \section{Generation Prompt}
 \label{app:prompt}
 
-The closed-book generation prompt (abridged); the postcondition is stripped from the program before it is shown.
+The complete generation template; closed-book inference strips an assertion when one is present before inserting the program source.  General ACSL rules are supplied separately by \texttt{system\_prompt.txt}.
 
-\begin{promptbox}[System prompt (abridged)]
+\begin{promptbox}[Generation prompt]
 \begin{lstlisting}[style=promptstyle]
-You are given a C function containing a loop. Produce the strongest
-inductive ACSL loop invariants that capture the loop's behavior:
-- one core conservation / relational equality when one exists;
-- minimal tight progress bounds (weaken strict guards to non-strict
-  at exit);
-- an exact loop assigns clause;
-- no tautologies, no restatement of the guard alone;
-- reference initial parameter values only via \at(v, Pre);
-- allowed operators: == != < <= > >= && || ! ==> <==> + - * / %.
-Output ONLY lines of the form:
-  loop invariant <expr>;
+You are given a C function. Produce the strongest inductive ACSL loop
+invariants that capture the loop's behavior (conservation/relational laws
++ tight progress bounds). Output ONLY invariant lines, each formatted
+exactly as:
+loop invariant <expr>;
+
+Program:
+{program}
 \end{lstlisting}
 \end{promptbox}
 
 \section{Reward Service Interface}
 \label{app:service}
 
-The reward framework is packaged as a slim container (no prover, no GPU dependencies) exposing
-\texttt{POST /reward} with body \texttt{\{program, rollouts[]\}} and response
-\texttt{\{rollout\_rewards[], base[], marginal[], rollouts[] (with rejection detail), batch\_score, should\_reroll\}}.
+The reward framework is packaged as a self-contained, CPU-only container with gcc, Frama-C/WP, Why3, and Z3 bundled.  It exposes \texttt{POST /reward}, accepting program source and a rollout array, with the following response fields:
+\begin{lstlisting}[style=promptstyle]
+{program, n_positives, n_negatives, filter_mode,
+ rollout_rewards[], base[], marginal[], rollouts[],
+ batch_score, should_reroll}
+\end{lstlisting}
 Rollouts may be raw LLM text, invariant lists, or annotated code; parsing is uniform.
-An offline scorer provides the same computation over JSONL/Parquet rollout dumps for trainer-side batching.
+For refinement training, \texttt{POST /refine\_feedback} returns the WP verdict table and assembled stateless prompt, while \texttt{POST /refine\_reward} returns each candidate repair's $\Delta\mathrm{base}$ over its shared pool.  An offline scorer provides the generation reward over JSONL/Parquet rollout dumps for trainer-side batching.
