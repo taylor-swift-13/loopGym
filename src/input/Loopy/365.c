@@ -1,0 +1,59 @@
+// Source: data/benchmarks/sv-benchmarks/loop-invgen/MADWiFi-encode_ie_ok.c
+#define LARGE_INT 1000000
+extern int unknown_int(void);
+
+/*@
+  requires leader_len < LARGE_INT;
+  requires bufsize < LARGE_INT;
+  requires ielen < LARGE_INT;
+  requires leader_len >0;
+  requires bufsize >0;
+  requires ielen >0;
+  requires !(bufsize < leader_len);
+  requires !(bufsize < 2*ielen);
+*/
+void loopy_365(int i, int leader_len, int bufsize, int ielen)
+{
+  
+  int p;
+  
+  
+  
+  int bufsize_0;
+  
+  
+  
+
+  
+  
+  
+
+  
+
+  p = 0;
+
+  bufsize_0 = bufsize;
+  bufsize -= leader_len;
+  p += leader_len;
+
+  
+
+  {
+  i = 0;
+  while (i < ielen && bufsize > 2) {
+    {;
+    //@ assert(0<=p);
+    }
+    
+        {;
+    //@ assert(p+1<bufsize_0);
+    }
+    
+        p += 2;
+    i++;
+  }
+}
+
+ END:
+  ;
+}

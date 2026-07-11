@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from rl_pipeline.common.program import parse_program, strip_postcondition
 from rl_pipeline.common.state import State, eval_predicate, first_falsifying_state
+from rl_pipeline.eval.mislabel_audit import discover_programs
 from rl_pipeline.inference import InferenceFramework, MockRolloutProvider
 from rl_pipeline.inference import inference as inference_module
 from rl_pipeline.reward import annotate
@@ -188,6 +190,35 @@ class SyntaxScrubRegressionTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("gcc"), "gcc is required for sampler tests")
 class SamplerIntegrationRegressionTests(unittest.TestCase):
+    def test_typed_oracle_stub_and_labelled_body_compile(self):
+        typed = (
+            "extern unsigned int unknown_uint(void); "
+            "void f(void) { unsigned int x = unknown_uint(); "
+            "while (x > 0) { x--; } }"
+        )
+        program = parse_program(typed)
+        instrumented = cexec.instrument(typed, program)
+        full = cexec._build_program(instrumented, program, {}, run_seed=1)
+        self.assertIn("unsigned int unknown_uint(void)", full)
+        cexec._compile_run_parse(full, program, {}, 0, timeout=1)
+
+        boolean = (
+            "extern int unknown_bool(void); "
+            "void f(void) { int x = 0; while (unknown_bool()) { x++; } }"
+        )
+        program = parse_program(boolean)
+        full = cexec._build_program(
+            cexec.instrument(boolean, program), program, {}, run_seed=1
+        )
+        self.assertIn("int unknown_bool(void){ return (int)(rand() & 1); }", full)
+
+        labelled = "void f(void) { int x = 0; while (x < 1) { out: x++; } }"
+        program = parse_program(labelled)
+        instrumented = cexec.instrument(labelled, program)
+        self.assertEqual(instrumented.count("out:"), 1)
+        full = cexec._build_program(instrumented, program, {}, run_seed=1)
+        cexec._compile_run_parse(full, program, {}, 0, timeout=1)
+
     def test_offline_jsonl_scoring_writes_structured_rows(self):
         source = "void f(void) { int x = 0; while (x < 2) { x++; } }"
         with tempfile.TemporaryDirectory() as directory:
@@ -373,6 +404,93 @@ class InferenceRegressionTests(unittest.TestCase):
                 ):
                     self.assertIs(framework._verify(source), expected)
 
+    def test_in_loop_assertion_requires_a_successful_verification_goal(self):
+        source = (
+            "void f(void) { int x = 0; while (x < 1) { "
+            "/*@ assert x >= 0; */ x++; } }"
+        )
+        framework = InferenceFramework(
+            source,
+            rollout_provider=MockRolloutProvider([["x >= 0"]]),
+            invariant_filter=self._IdentityFilter(),
+            n_rollouts=1,
+            max_rerolls=0,
+        )
+
+        for verify_result, expected in (([], False), ([False], False), ([True], True)):
+            with self.subTest(verify_result=verify_result):
+                fake = self._fake_verifier(verify_result)
+                with (
+                    mock.patch.object(
+                        inference_module.filters,
+                        "frama_c_available",
+                        return_value=True,
+                    ),
+                    mock.patch("src.output_verify.OutputVerifier", fake),
+                ):
+                    self.assertIs(framework._verify(source), expected)
+
+    def test_only_final_verification_receives_the_original_assertion(self):
+        source = (
+            "/*@ requires limit >= 0; */\n"
+            "void f(int limit) {\n"
+            "  int x = 0;\n"
+            "  while (x < limit) { x++; }\n"
+            "  /*@ assert x == limit; */\n"
+            "}\n"
+        )
+        seen = {}
+
+        class RecordingProvider:
+            @staticmethod
+            def __call__(program, _n):
+                seen["generate"] = program
+                return [["x >= 0"]]
+
+            @staticmethod
+            def refine(program, _feedback, _n):
+                seen["refine"] = program
+                return [["x <= limit"]]
+
+        class RecordingFilter:
+            @staticmethod
+            def precheck(program, _loop_idx, invariants):
+                seen["precheck"] = program
+                return [
+                    inference_module.filters.Verdict(
+                        invariants[0], False, "wp", "needs a companion"
+                    )
+                ]
+
+            @staticmethod
+            def filter(program, _loop_idx, invariants, positives=None):
+                seen["filter"] = program
+                return list(invariants)
+
+        framework = InferenceFramework(
+            source,
+            rollout_provider=RecordingProvider(),
+            invariant_filter=RecordingFilter(),
+            n_rollouts=1,
+            max_rerolls=0,
+            m_refine=1,
+        )
+        framework._verify = mock.Mock(return_value=True)
+
+        result = framework.run()
+
+        for stage in ("generate", "precheck", "refine", "filter"):
+            with self.subTest(stage=stage):
+                program = seen[stage]
+                self.assertNotIn("assert x == limit", program.source)
+                self.assertEqual(program.post, "")
+                self.assertEqual(program.requires, "limit >= 0")
+        verified_source = framework._verify.call_args.args[0]
+        self.assertEqual(verified_source, result.annotated_code)
+        self.assertIn("assert x == limit", verified_source)
+        self.assertIn("loop invariant x >= 0;", verified_source)
+        self.assertIn("loop invariant x <= limit;", verified_source)
+
     def test_reroll_count_reports_attempts_even_when_first_result_stays_best(self):
         class Provider:
             def __init__(self):
@@ -400,6 +518,48 @@ class InferenceRegressionTests(unittest.TestCase):
 
 
 class CommandAndPackagingRegressionTests(unittest.TestCase):
+    def test_loopy_manifest_covers_normalized_inputs(self):
+        loopy = ROOT / "src" / "input" / "Loopy"
+        manifest = [
+            json.loads(line)
+            for line in (loopy / "manifest.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        c_files = sorted(loopy.glob("*.c"), key=lambda path: int(path.stem))
+
+        self.assertEqual(len(manifest), 469)
+        self.assertEqual([row["id"] for row in manifest], list(range(1, 470)))
+        self.assertEqual([row["file"] for row in manifest], [p.name for p in c_files])
+        for row, path in zip(manifest, c_files):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(row["output_sha256"], digest)
+            source = path.read_text(encoding="ascii")
+            self.assertNotRegex(source, r"\b(?:for|do)\s*\(")
+            self.assertEqual(len(parse_program(source).loops), 1)
+
+        fixed_point = {
+            row["id"] for row in manifest
+            if row["semantic_status"] == "fixed-point-adaptation"
+        }
+        self.assertEqual(fixed_point, {353, 354, 355})
+        self.assertEqual(len(discover_programs("core")), 366)
+        self.assertEqual(len(discover_programs("loopy")), 469)
+        self.assertEqual(len(discover_programs("all")), 835)
+        self.assertTrue((loopy / "UPSTREAM_LICENSE.txt").is_file())
+        self.assertTrue((loopy / "sources.txt").is_file())
+        licenses = [
+            path for path in (loopy / "LICENSES").rglob("*")
+            if "license" in path.name.lower()
+        ]
+        self.assertEqual(len(licenses), 18)
+        self.assertFalse((ROOT / "benchmarks").exists())
+
+        inference_cli = importlib.import_module("rl_pipeline.inference.__main__")
+        expanded = inference_cli._expand([str(loopy)])
+        self.assertEqual(expanded, sorted(str(path) for path in c_files))
+
     def test_refine_reward_rejects_an_out_of_range_loop_index(self):
         source = "void f(void) { int x = 0; while (x < 1) { x++; } }"
         service._EXAMPLE_CACHE.clear()

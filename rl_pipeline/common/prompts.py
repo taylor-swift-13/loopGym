@@ -3,7 +3,7 @@
 Edit the .txt files — never inline prompt text in code.  Templates use
 str.format placeholders ({program}, {feedback}) filled at call sites.
 
-  generate_prompt.txt  — rollout generation (closed-book by default)
+  generate_prompt.txt  — rollout generation (always closed-book)
   refine_prompt.txt    — m-round refine; STATELESS by design: it sees only
                          program + current pool verdicts (no round number, no
                          history), so "train one round, infer many" stays

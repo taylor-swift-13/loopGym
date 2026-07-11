@@ -47,26 +47,149 @@ _DEFAULT_MAX = 64
 
 # ── input domain ────────────────────────────────────────────────────────────
 
+def _strip_outer_parens(expr: str) -> str:
+    expr = expr.strip()
+    while len(expr) >= 2 and expr[0] == "(" and expr[-1] == ")":
+        depth = 0
+        for index, char in enumerate(expr):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != len(expr) - 1:
+                    return expr
+        if depth != 0:
+            return expr
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _requirement_conjuncts(expr: str) -> List[str]:
+    """Split only top-level conjunctions, preserving negated subexpressions."""
+    expr = _strip_outer_parens(expr)
+    parts: List[str] = []
+    start = 0
+    depth = 0
+    index = 0
+    while index < len(expr):
+        if expr[index] == "(":
+            depth += 1
+        elif expr[index] == ")":
+            depth -= 1
+        elif depth == 0 and expr[index:index + 2] == "&&":
+            parts.extend(_requirement_conjuncts(expr[start:index]))
+            start = index + 2
+            index += 1
+        index += 1
+    if parts:
+        parts.extend(_requirement_conjuncts(expr[start:]))
+        return parts
+    return [expr]
+
+
 def param_constraints(requires: str, params: List[str]) -> Dict[str, Dict[str, int]]:
-    """Very small requires -> per-param {min,max} parser (EXPLICIT literal bounds
-    only; the tier clamp falls back to the +/-64 defaults where nothing is
-    stated, while far probes may roam wider)."""
+    """Extract direct, non-negated literal bounds for each parameter.
+
+    The bounds only shape candidate generation; the complete requirement is
+    still evaluated before a tuple is admitted.  Matching whole conjunctions
+    matters here: scanning arbitrary substrings would read ``!(n < 0)`` as
+    ``n < 0`` and generate exclusively out-of-contract inputs.
+    """
     cons: Dict[str, Dict[str, int]] = {p: {} for p in params}
     if not requires:
         return cons
-    rules = [
-        (r"(\w+)\s*==\s*(-?\d+)", lambda v: {"min": v, "max": v}),
-        (r"(\w+)\s*>=\s*(-?\d+)", lambda v: {"min": v}),
-        (r"(\w+)\s*>\s*(-?\d+)", lambda v: {"min": v + 1}),
-        (r"(\w+)\s*<=\s*(-?\d+)", lambda v: {"max": v}),
-        (r"(\w+)\s*<\s*(-?\d+)", lambda v: {"max": v - 1}),
-    ]
-    for pat, fn in rules:
-        for m in re.finditer(pat, requires):
-            name = m.group(1)
-            if name in cons:
-                cons[name].update(fn(int(m.group(2))))
+
+    inverse = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "=="}
+
+    def add_bound(name: str, operator: str, value: int) -> None:
+        if name not in cons:
+            return
+        if operator == "==":
+            lower = upper = value
+        elif operator == ">=":
+            lower, upper = value, None
+        elif operator == ">":
+            lower, upper = value + 1, None
+        elif operator == "<=":
+            lower, upper = None, value
+        else:
+            lower, upper = None, value - 1
+        if lower is not None:
+            cons[name]["min"] = max(lower, cons[name].get("min", lower))
+        if upper is not None:
+            cons[name]["max"] = min(upper, cons[name].get("max", upper))
+
+    for raw_clause in _requirement_conjuncts(requires):
+        clause = _strip_outer_parens(raw_clause)
+        if clause.startswith("!"):
+            continue
+        direct = re.fullmatch(r"([A-Za-z_]\w*)\s*(==|>=|>|<=|<)\s*(-?\d+)", clause)
+        if direct:
+            add_bound(direct.group(1), direct.group(2), int(direct.group(3)))
+            continue
+        reversed_ = re.fullmatch(r"(-?\d+)\s*(==|>=|>|<=|<)\s*([A-Za-z_]\w*)", clause)
+        if reversed_:
+            add_bound(
+                reversed_.group(3),
+                inverse[reversed_.group(2)],
+                int(reversed_.group(1)),
+            )
     return cons
+
+
+def _integer_source_constants(source: str) -> Dict[str, int]:
+    """Return integer object-like macros and initialized file-scope globals."""
+    constants: Dict[str, int] = {}
+    literal = r"[+-]?(?:0[xX][0-9A-Fa-f]+|\d+)[uUlL]*"
+
+    for match in re.finditer(
+        rf"(?m)^\s*#\s*define\s+([A-Za-z_]\w*)\s+\(?\s*({literal})\s*\)?\s*$",
+        source,
+    ):
+        raw = re.sub(r"[uUlL]+$", "", match.group(2))
+        constants[match.group(1)] = int(raw, 0)
+
+    # Blank comments and function bodies so local initializers cannot be
+    # mistaken for the caller-visible value of a global.
+    clean = re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), source, flags=re.DOTALL)
+    clean = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), clean)
+    top = list(clean)
+    depth = 0
+    for index, char in enumerate(clean):
+        if char == "{":
+            depth += 1
+            top[index] = " "
+        elif char == "}":
+            top[index] = " "
+            depth = max(0, depth - 1)
+        elif depth and char != "\n":
+            top[index] = " "
+    top_level = "".join(top)
+    declaration = re.compile(
+        rf"(?m)^\s*(?:(?:static|extern|const|volatile|unsigned|signed)\s+)*"
+        rf"(?:int|long|short)\s+([A-Za-z_]\w*)\s*=\s*({literal})\s*;"
+    )
+    for match in declaration.finditer(top_level):
+        raw = re.sub(r"[uUlL]+$", "", match.group(2))
+        constants[match.group(1)] = int(raw, 0)
+    return constants
+
+
+def _bind_integer_constants(expr: str, constants: Dict[str, int]) -> str:
+    for name in sorted(constants, key=len, reverse=True):
+        expr = re.sub(rf"\b{re.escape(name)}\b", str(constants[name]), expr)
+    return expr
+
+
+def _eval_requirement(requires: str, values: Dict[str, int]) -> Optional[bool]:
+    """Evaluate a requirement after aliasing C identifiers to Python-safe names."""
+    expression = requires
+    aliases: Dict[str, int] = {}
+    for index, name in enumerate(sorted(values, key=len, reverse=True)):
+        alias = f"__req_value_{index}"
+        expression = re.sub(rf"\b{re.escape(name)}\b", alias, expression)
+        aliases[alias] = values[name]
+    return eval_predicate(expression, State(vars=aliases, pre=aliases))
 
 
 # tiers give broad coverage: edges, small, medium (both signs where allowed)
@@ -127,15 +250,24 @@ def _tier_tuple(params: List[str], cons: Dict[str, Dict[str, int]], r: int, seed
             for j, p in enumerate(params)}
 
 
-def _grid_tuple(params: List[str], cons: Dict[str, Dict[str, int]], r: int, seed: int) -> Dict[str, int]:
-    """Phase-2 mixed-radix grid: systematically enumerates tier COMBINATIONS.
-    Unlike the stripe (whose params never coincide — the tiers are distinct), the
-    grid reaches e.g. equal-value tuples, so param-vs-param requires like
-    `z == k` are satisfiable (r=0 yields all-equal)."""
+def _grid_tuple(
+    params: List[str],
+    cons: Dict[str, Dict[str, int]],
+    r: int,
+    seed: int,
+    rotation: int = 0,
+) -> Dict[str, int]:
+    """Enumerate tier combinations with a rotating least-significant input.
+
+    A fixed mixed-radix order needs ``len(_TIERS) ** j`` candidates before
+    parameter ``j`` changes.  Rotating the digit positions prevents a bounded
+    search from leaving the last inputs fixed in four-or-more parameter code.
+    """
     n = len(_TIERS)
     vals: Dict[str, int] = {}
     for j, p in enumerate(params):
-        digit = (r // (n ** j) + seed) % n
+        exponent = (j - rotation) % max(1, len(params))
+        digit = (r // (n ** exponent) + seed) % n
         vals[p] = _clamp_tier(_TIERS[digit], cons, p)
     return vals
 
@@ -202,7 +334,7 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
         if params and key in seen:
             return False
         if requires:
-            ok = eval_predicate(requires, State(vars=dict(vals), pre=dict(vals)))
+            ok = _eval_requirement(requires, vals)
             if ok is not True:
                 return False
         seen.add(key)
@@ -228,11 +360,14 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
     # phase 2 — mixed-radix grid: reaches tier COMBINATIONS the stripe cannot
     # (e.g. equal values), so `requires z == k`-style constraints are satisfied
     # instead of falling through to unchecked inputs.
-    r = 0
     limit = max(n_runs * 400, 4000)
-    while len(runs) < n_runs and r < limit:
-        admit(_grid_tuple(params, cons, r, seed))
-        r += 1
+    rotations = max(1, len(params))
+    for candidate in range(limit):
+        if len(runs) >= n_runs:
+            break
+        rotation = candidate % rotations
+        r = candidate // rotations
+        admit(_grid_tuple(params, cons, r, seed, rotation=rotation))
     # Phase 3 targets large constants and pairwise offsets from the contract.
     if requires and len(runs) < n_runs:
         for vals in _requirement_tuples(params, cons, requires, seed):
@@ -295,7 +430,12 @@ def instrument(source: str, prog: Program, loop_idx: int = 0) -> str:
 
     open_, close = loop.body_open, loop.body_close
     body_text = source[open_ + 1:close]          # original body (no injected printfs)
-    if re.search(r"\b(return|goto)\b", body_text):
+    # Replaying a body containing an escape or a label is not a closed
+    # transition.  In particular, copying a label makes the instrumented C
+    # invalid because labels have function scope, even when the copies live in
+    # different blocks.
+    if (re.search(r"\b(return|goto)\b", body_text)
+            or re.search(r"(?m)^\s*[A-Za-z_]\w*\s*:", body_text)):
         overrun = ""                             # body escapes the function -> unsafe
     else:
         ov = f"__ov{li}"
@@ -311,6 +451,36 @@ def instrument(source: str, prog: Program, loop_idx: int = 0) -> str:
     return out
 
 
+def _oracle_return_type(source: str, name: str) -> str:
+    """Return the declared scalar C type for an undefined oracle function."""
+    scalar = (
+        r"_Bool|(?:unsigned\s+|signed\s+)?"
+        r"(?:char|short|int|long(?:\s+long)?)|float|double"
+    )
+    matches = list(re.finditer(
+        rf"\b(?P<type>{scalar})\s+{re.escape(name)}\s*\([^;{{}}]*\)\s*;",
+        source,
+    ))
+    return re.sub(r"\s+", " ", matches[-1].group("type")).strip() if matches else "int"
+
+
+def _oracle_definition(source: str, name: str) -> str:
+    return_type = _oracle_return_type(source, name)
+    if return_type == "_Bool" or name.endswith("bool"):
+        expression = f"({return_type})(rand() & 1)"
+    elif name.endswith("uchar"):
+        expression = f"({return_type})(rand()%256)"
+    elif name.endswith("ushort"):
+        expression = f"({return_type})(rand()%65536)"
+    elif return_type in {"float", "double"}:
+        expression = f"({return_type})(rand()%2001 - 1000) / 1000"
+    elif "unsigned" in return_type:
+        expression = f"({return_type})(rand()%513)"
+    else:
+        expression = f"({return_type})(rand()%1025 - 512)"
+    return f"{return_type} {name}(void){{ return {expression}; }}\n"
+
+
 def _build_program(instr_func: str, prog: Program, inputs: Dict[str, int], run_seed: int = 12345) -> str:
     prelude = '#include <stdio.h>\n#include <stdlib.h>\n'
     # Define any unknown/unknownN oracle that is CALLED but not DEFINED — a bare
@@ -321,7 +491,7 @@ def _build_program(instr_func: str, prog: Program, inputs: Dict[str, int], run_s
     # trajectory (bounded by _ITER_CAP); as an assigned VALUE it gives real spread.
     for name in sorted(set(re.findall(r"\b(unknown\w*)\s*\(", instr_func))):
         if not re.search(rf"\b{name}\s*\([^;{{)]*\)\s*\{{", instr_func):
-            prelude += f"int {name}(){{ return rand()%21 - 10; }}\n"
+            prelude += _oracle_definition(instr_func, name)
     fname = prog.func_name
     if fname == "main":   # program's own function is main() -> rename to avoid clashing with the harness
         instr_func = re.sub(r"\bmain\s*\(", "__prog_main(", instr_func, count=1)
@@ -425,7 +595,11 @@ def collect_traces(
     reachable continuations, not negatives — and capped_any is set so callers
     can disable range-based reasoning."""
     src = source_override if source_override is not None else prog.source
-    cons = param_constraints(prog.requires, prog.params)
+    requires = _bind_integer_constants(
+        prog.requires,
+        _integer_source_constants(src),
+    )
+    cons = param_constraints(requires, prog.params)
     for param in prog.unsigned_vars:
         if param in cons:
             cons[param]["min"] = max(0, cons[param].get("min", 0))
@@ -433,7 +607,7 @@ def collect_traces(
     # each run gets a distinct srand, exploring different unknown() traces
     deterministic = not re.search(r"\bunknown\w*\s*\(", src)
     inputs_list = sample_inputs(prog.params, cons, n_runs, seed=seed,
-                                requires=prog.requires, single_ok=deterministic)
+                                requires=requires, single_ok=deterministic)
     reachable: List[State] = []
     overrun: List[State] = []
     capped_any = False

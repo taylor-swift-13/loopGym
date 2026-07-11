@@ -42,8 +42,9 @@ python3 -m rl_pipeline.inference \
 ```
 
 This creates one in-process `VLLMRolloutProvider` and batches all rollouts for a
-program in one vLLM call. Assertions are hidden by default. `--show-assert`
-enables open-book evaluation; use it only when that is the intended experiment.
+program in one vLLM call. Generation, refinement, WP prechecks, and Houdini
+pruning never receive the assertion; only final verification uses the original
+target-bearing program.
 
 The inference Docker image provides the containerized vLLM environment:
 
@@ -83,7 +84,7 @@ config = LLMConfig(
     api_top_p=1.0,
     api_max_tokens=2048,
 )
-provider = LLMRolloutProvider(chat_fn=Chatbot(config).chat, hide_assert=True)
+provider = LLMRolloutProvider(chat_fn=Chatbot(config).chat)
 result = InferenceFramework(
     source,
     rollout_provider=provider,
@@ -124,7 +125,7 @@ config = LLMConfig(
     api_top_p=1.0,
     api_max_tokens=2048,
 )
-provider = LLMRolloutProvider(chat_fn=Chatbot(config).chat, hide_assert=True)
+provider = LLMRolloutProvider(chat_fn=Chatbot(config).chat)
 result = InferenceFramework(source, rollout_provider=provider).run()
 print(result.final_invariants, result.verified)
 ```

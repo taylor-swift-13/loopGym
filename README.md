@@ -42,6 +42,10 @@ run passes through):
   history iff some invariant is false at any witness — and rewards count in
   trace units, so one long fake continuation is one negative, not twenty-four.
 
+Input generation evaluates the full `requires` contract, including numeric C
+macros, initialized file-scope integers, negated clauses, and relations between
+parameters.
+
 The training signal favors invariants that are sound on sampled positives and
 exclude many audited negative candidates. The design is deliberately minimal:
 three candidate families, conservative construction guards, and no scoring-side
@@ -163,8 +167,10 @@ inf = InferenceFramework(source, rollout_provider=VLLMRolloutProvider(model="...
 res = inf.run()   # generate → union → m refine rounds → Houdini → Frama-C verify
 res.final_invariants, res.verified, res.refine_rounds
 ```
-- `hide_assert=True` (default, closed-book): the model synthesises invariants from
-  the loop, never seeing the assert; `hide_assert=False` shows the full program.
+- **Strict closed-book inference**: generation, refinement, WP prechecks, and
+  Houdini pruning all use a program with `assert`/`ensures` removed. Only the
+  final Frama-C verification inserts the surviving invariants into the original
+  target-bearing program.
 - **m-round refine**: each round runs a cheap WP precheck (syntax + at most two
   WP passes, no fixpoint) over the merged pool, renders a per-invariant verdict table
   (`filters.Verdict` — syntax errors quote frama-c, WP failures say whether
@@ -229,6 +235,25 @@ paper/                current method description and reproducible evaluation
 tests/                standard-library regression tests
 ```
 
+## Benchmark corpora
+
+- `src/input/{linear,NLA_lipus}/` is LoopGym's 366-program canonical sampler
+  suite.  It is the suite covered by the discrimination and mislabel-audit
+  results reported above and in the paper.
+- `src/input/Loopy/` contains all 469 programs from Loopy's scalar
+  loop-invariant corpus, normalized to LoopGym's single braced-`while`, scalar
+  integer input model.  The numeric filename-to-upstream-path mapping,
+  checksums, transformations, source notices, and three fixed-point adaptations
+  are documented in [`src/input/Loopy/README.md`](src/input/Loopy/README.md).
+
+The Loopy snapshot is a comparison corpus, not a disjoint or held-out set, and
+is not part of the measured 366-program sampler audit.  The imported programs
+are kept separate so future Loopy results cannot be confused with that existing
+measurement.
+
+The two corpora also share upstream sources, including Code2Inv, so `366 + 469`
+must not be reported as a count of distinct semantic tasks.
+
 ## Verification
 
 ```bash
@@ -236,7 +261,10 @@ python3 -m unittest discover -s tests -v
 ruff check rl_pipeline src tests
 python3 -m rl_pipeline.eval.discrimination
 python3 -m rl_pipeline.eval.mislabel_audit --jobs 8
+python3 -m rl_pipeline.eval.mislabel_audit --suite loopy --jobs 8
 ```
 
-The two evaluation commands use the benchmark suite and are slower than the
-unit tests. Put the Frama-C/Why3 binaries on `PATH` to exercise the real cascade.
+The evaluation commands are slower than the unit tests.  The default mislabel
+audit retains the published 366-program core boundary; `--suite loopy` selects
+the normalized 469-program comparison corpus. Put the Frama-C/Why3 binaries on
+`PATH` to exercise the real cascade.

@@ -19,13 +19,19 @@ from . import InferenceFramework, VLLMRolloutProvider
 
 def _expand(patterns):
     out = []
+    seen = set()
     for p in patterns:
         if os.path.isdir(p):
-            out += sorted(glob.glob(os.path.join(p, "*.c")))
+            matches = sorted(glob.glob(os.path.join(p, "**", "*.c"), recursive=True))
         elif any(c in p for c in "*?["):
-            out += sorted(glob.glob(p))
+            matches = sorted(glob.glob(p, recursive=True))
         else:
-            out.append(p)
+            matches = [p]
+        for match in matches:
+            key = os.path.abspath(match)
+            if key not in seen:
+                seen.add(key)
+                out.append(match)
     return out
 
 
@@ -42,8 +48,6 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=2048)
-    ap.add_argument("--show-assert", action="store_true",
-                    help="open-book: let the model see the assert (default: hidden)")
     ap.add_argument("--output", default=None, help="write per-program results as JSONL")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -53,7 +57,7 @@ def main():
         raise SystemExit("no input .c files matched")
 
     provider = VLLMRolloutProvider(
-        model=args.model, hide_assert=not args.show_assert,
+        model=args.model,
         temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens,
     )
     rows, verified = [], 0
@@ -65,6 +69,7 @@ def main():
         res = fw.run()
         verified += int(res.verified is True)
         rows.append({
+            "input": path,
             "program": os.path.basename(path),
             "verified": res.verified,
             "invariants": res.final_invariants,

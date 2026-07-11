@@ -22,6 +22,19 @@ REPO = Path(__file__).resolve().parents[2]
 INPUT = REPO / "src" / "input"
 
 
+def discover_programs(suite: str = "core") -> list[str]:
+    roots = {
+        "core": ("linear", "NLA_lipus"),
+        "loopy": ("Loopy",),
+        "all": ("linear", "NLA_lipus", "Loopy"),
+    }[suite]
+    return sorted(
+        str(path.relative_to(INPUT))
+        for directory in roots
+        for path in (INPUT / directory).glob("*.c")
+    )
+
+
 def audit_one(rel: str, base_runs: int, audit_runs: int) -> dict:
     from ..sampler import ExampleSampler
 
@@ -59,17 +72,19 @@ def main() -> int:
     ap.add_argument("--audit-runs", type=int, default=DEFAULT_N_RUNS * 2)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--json", default=None)
+    ap.add_argument(
+        "--suite",
+        choices=("core", "loopy", "all"),
+        default="core",
+        help="benchmark set to audit (default: the measured 366-program core)",
+    )
     args = ap.parse_args()
     if args.base_runs < 1 or args.audit_runs < args.base_runs:
         ap.error("require 1 <= base-runs <= audit-runs")
     if args.jobs < 1:
         ap.error("jobs must be at least 1")
 
-    programs = sorted(
-        str(p.relative_to(INPUT))
-        for d in ("linear", "NLA_lipus")
-        for p in (INPUT / d).glob("*.c")
-    )
+    programs = discover_programs(args.suite)
     tasks = [(rel, args.base_runs, args.audit_runs) for rel in programs]
     with mp.Pool(args.jobs) as pool:
         results = pool.map(_worker, tasks)
