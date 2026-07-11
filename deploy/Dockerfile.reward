@@ -1,4 +1,4 @@
-# SAM2INV — Reward scoring microservice (real Houdini, self-contained).
+# LoopGym — Reward scoring microservice (real Houdini, self-contained).
 #
 #   Input : POST /reward  { "program": "<C src>", "rollouts": [ {"invariants":[...]}, ... ] }
 #   Output: per-rollout scores (reward / base / marginal / rejected) + batch_score
@@ -8,8 +8,8 @@
 # image, so a deployment host (e.g. a verl RL server) needs NO local frama-c —
 # it only calls the HTTP endpoint.
 #
-# Build (context = repo root):  docker build -f deploy/Dockerfile.reward -t sam2inv-reward .
-# Run:                          docker run --rm -p 8000:8000 sam2inv-reward
+# Build (context = repo root):  docker build -f deploy/Dockerfile.reward -t loopgym-reward .
+# Run:                          docker run --rm -p 8000:8000 loopgym-reward
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -39,6 +39,9 @@ COPY rl_pipeline/__init__.py  /app/rl_pipeline/__init__.py
 COPY rl_pipeline/common/      /app/rl_pipeline/common/
 COPY rl_pipeline/sampler/     /app/rl_pipeline/sampler/
 COPY rl_pipeline/reward/      /app/rl_pipeline/reward/
+
+# --- prompts (single source of truth; /refine_feedback assembles from these) ---
+COPY prompt/                  /app/prompt/
 
 # --- src modules the real HoudiniFilter reuses (frama-c/WP driver + spec checks) ---
 COPY src/config.py src/houdini_pruner.py src/unified_filter.py \

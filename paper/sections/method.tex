@@ -2,106 +2,58 @@
 \section{Method}\label{sec:method}
 %% ============================================================
 
-%% ---- Notation ----
 \paragraph{Notation.}
-For a program $P = (\phi_{\mathrm{pre}}, B, S)$, a \emph{rollout} $A = \{e_1, \dots, e_k\}$ is one candidate clause set produced by one policy sample; a \emph{group} $\mathcal{A} = \{A_1, \dots, A_G\}$ is the set of rollouts sampled for $P$ in one RL step.
-The sampler emits an example set $E = (\mathcal{P}, \mathcal{N})$: positives $\mathcal{P}$ (reachable loop-head states) and negatives $\mathcal{N}$ grouped into \emph{trace units}---each unit is one impossible history, witnessed by one or more states.
-$\mathrm{surv}(A) \subseteq A$ denotes the subset of $A$ surviving the filter cascade (complexity gate, scope check, positive-soundness, Houdini induction; $\S$\ref{sec:method:reward}).
-A clause set \emph{rejects} a trace unit iff some surviving clause evaluates to false on some witness state of that unit; $\mathrm{rej}(X) \subseteq \mathcal{N}$ is the set of units rejected by clause set $X$.
+For a program $P = (\phi_{\mathrm{pre}}, B, S)$, a \emph{rollout} $A$ is one candidate clause set produced by one policy sample, and a \emph{group} $\mathcal{A} = \{A_1, \dots, A_G\}$ is the set of rollouts sampled for $P$ in one RL step.
+The sampler emits positives $\mathcal{P}$ (reachable loop-head states, each carrying its run's input valuation) and negatives $\mathcal{N}$ grouped into \emph{trace units}: each unit is one impossible history under a concrete input, witnessed by one or more states.
+$\mathrm{surv}(X)$ denotes the subset of clause set $X$ that survives the filter cascade of \S\ref{sec:method:reward}, and $\mathrm{rej}(X) \subseteq \mathcal{N}$ the trace units rejected by $X$ --- a unit is rejected iff some surviving clause is false at one of its witness states.
 
-%% ============================================================
+%% ------------------------------------------------------------
 \subsection{Sampler: Positives and Truthful Negatives}
 \label{sec:method:sampler}
 
-The sampler is the semantic ground truth of the system, and it is deliberately \emph{blind to the postcondition}: it parses only the precondition, guard, and body.
+The sampler is deliberately blind to the postcondition: it parses only the precondition, guard, and body.
+It instruments the loop to print the loop-head valuation on entry, at every iteration, and at exit, compiles with \texttt{gcc}, and executes over a deterministic, precondition-checked input sweep (edge and moderate magnitudes, systematic tier combinations, plus a few large-magnitude probes that widen the input envelope).
+Loops run to their real exit; runs that hit the iteration cap are flagged and excluded from any range conclusion.
+The observed loop-head states are the positives.
 
-\paragraph{Positives by concrete execution.}
-The loop is instrumented with prints at loop entry, at the top of every iteration, and after exit, then compiled with \texttt{gcc} and executed.
-Inputs are swept deterministically over a 20-tier magnitude schedule (edge values $0, \pm1, 2, 3$ through moderate magnitudes, clamped to declared per-parameter bounds), in three phases: seed-hashed \emph{far probes} (magnitudes up to 512, cube-safe against 32-bit overflow), \emph{stripes} (all parameters move together), and a mixed-radix \emph{grid} (tier combinations, so parameter-coupling preconditions such as $z = k$ receive satisfying tuples).
-Every tuple is checked against the full precondition before use---out-of-contract inputs would poison the positive set.
-Nondeterministic calls (\texttt{unknown()}) are auto-defined as seeded random oracles so repeated runs explore distinct branches.
-Loops run to their \emph{real} exit; print throttling keeps long loops cheap while keeping trace windows dense, and a run that hits the iteration cap is flagged so that no range conclusion is drawn from a truncated trace.
-
-\paragraph{Truthful negatives.}
-A negative that is actually reachable would penalize exactly the true invariants, so every negative must be \emph{provably impossible}---truthful by construction, derived from the loop's own dynamics rather than from executing mutated code.
-Negatives come in two balanced dimensions:
-
+Negatives are \emph{truthful by construction}: each family carries its own unreachability argument, and is emitted only where that argument holds.
 \begin{itemize}[leftmargin=1.5em, itemsep=2pt, topsep=2pt]
-\item \textbf{Relational negatives} expose missing laws ($x + y = n$, $z = x \cdot y$).
-Small single-axis and pairwise perturbations ($\pm\{1,2,3\}$) are applied to \emph{dense bases}: trace states whose next $w = 4$ successors were all sampled, so every reachable in-window neighbor is known and a surviving perturbation is genuinely off the reachable manifold.
-\item \textbf{Bound negatives} expose missing range facts.
-\emph{Over-run states} execute the real body up to 24 steps past a genuine exit: they preserve every (even non-linear) relational law while violating the range, and each over-run continuation forms \emph{one} trace unit.
-\emph{Box-escape states} take large ladder steps ($\pm\{5, 8, 13, 21, 34, 55, 89\}$) kept only when they leave the variable's observed range.
+\item \textbf{Relational perturbations} apply $\pm\{1,2\}$ single-axis and pairwise steps to trace states whose next few successors were all sampled; since every reachable in-window neighbor is known, a surviving perturbation is genuinely off the reachable manifold.  They expose missing laws such as $x + y = n$.
+\item \textbf{Over-runs} execute the real body past a genuine exit: they preserve every (even non-linear) relational law while leaving the reachable range, and each continuation forms one trace unit.
+\item \textbf{Escapes} move one variable outside its observed range by ladder steps, kept only when they escape; since traces run to the real exit, escapees are unreachable.  Together with over-runs they expose missing range facts.
 \end{itemize}
+Three vetoes guarantee label correctness --- a mislabeled (actually reachable) negative would penalize exactly the true invariants.
+States observed in any run are never negatives; states that could constitute a fresh loop entry under their input (parameters at pre-values, initialized locals at their initializers, precondition satisfied) are dropped; and variables tainted by nondeterminism (\texttt{unknown()} values, control dependence on nondeterministic branches, and their data-flow closure) are never perturbed.
+A nondeterministic guard disables the over-run and escape families entirely --- the loop can always run longer, so no range is sound.
+The sampler thus degrades soundly: where no argument applies it emits few or no negatives rather than poisoned ones.
 
-Perturbed states that could constitute a fresh loop entry (parameters at their pre-values, literal-initialized locals at their initializers, precondition satisfied) are reachable and are dropped.
-Under nondeterminism the sampler degrades soundly rather than optimistically: a nondeterministic guard disables the entire bound dimension (the loop can always run longer); nondet-tainted variables are never perturbed directly, but sound signal is \emph{rescued} for them via conserved rigid pairs ($c_w v - c_v w$), gcd-lattice residues ($v \equiv v_0 \pmod g$), monotone floors/ceilings, and guard-implied bounds---each a provably sound fact even when no reachable range exists.
-
-\paragraph{Trace-unit accounting.}
-Negatives are counted per impossible \emph{history}, not per state: an over-run trajectory contributes one unit no matter how many witness states it carries, and a unit is rejected if any witness is.
-This prevents count inflation from long continuations and makes the reward's denominator semantically meaningful.
-
-%% ============================================================
-\subsection{Reward: Dense Scoring of Summary Tightness}
+%% ------------------------------------------------------------
+\subsection{Reward: Two Scores over Prover-Backed Survivors}
 \label{sec:method:reward}
 
-Given a program, a group $\mathcal{A}$, and an example set $E$, each rollout is scored in three steps.
+Each rollout is first reduced to its sound inductive core by a three-stage cascade.
+A \emph{syntax scrub} runs the Frama-C kernel on the annotated program and drops the exact \texttt{loop invariant} lines it rejects, so one malformed clause cannot void a whole candidate set.
+A \emph{positive pre-filter} then drops clauses that reference out-of-scope identifiers or are falsified by some sampled positive --- a cheap, prover-free approximation that only removes clauses the prover would reject anyway, saving Houdini iterations.
+Finally \emph{Houdini pruning}~\citep{flanagan2001houdini} over Frama-C/WP~\citep{framac} retains the greatest inductive subset.
+Because survival ends in a real prover, soundness never rests on the sampled states: predicates overfitted to the sample fail initiation or consecution for unconstrained inputs and are removed by proof.
 
-\paragraph{Step 1: survival.}
-$A \mapsto \mathrm{surv}(A)$ applies, in order: a per-clause \emph{complexity gate} (clauses longer than 160 characters or with more than 12 comparison atoms are dropped, not truncated); a scope check (clauses referencing out-of-scope identifiers are dropped); \emph{positive soundness} (any clause false on some sampled positive is dropped, with disequalities $v \ne c$ additionally checked against the \emph{full} observed value set of $v$ rather than a subsample); and, when Frama-C is available, Houdini pruning to the greatest inductive subset~\citep{flanagan2001houdini}.
-Positive subsampling always retains per-variable extremes---the witnesses that falsify overfitted boxes.
-Survival results are memoized on the normalized clause set, since ablation re-filters heavily overlapping sets.
-
-\paragraph{Step 2: per-rollout scores.}
-With $n = |\mathcal{N}|$ trace units and $U = \bigcup_{A \in \mathcal{A}} A$ the group union,
+Surviving clauses are scored against the negative trace units:
 \begin{align}
-\mathrm{base}(A) &= \frac{|\mathrm{rej}(\mathrm{surv}(A))|}{n},
-&
-\mathrm{marg}(A) &= \frac{\bigl|\mathrm{rej}(\mathrm{surv}(U)) \setminus \mathrm{rej}(\mathrm{surv}(U \setminus A))\bigr|}{n},
+\mathrm{base}(A) = \frac{|\mathrm{rej}(\mathrm{surv}(A))|}{|\mathcal{N}|},
+\qquad
+\mathrm{marg}(A) = \frac{\bigl|\mathrm{rej}(\mathrm{surv}(U)) \setminus \mathrm{rej}(\mathrm{surv}(U \setminus A))\bigr|}{|\mathcal{N}|},
 \end{align}
-i.e.\ base measures how much of the impossible space the rollout alone excludes, and the marginal term is the rollout's ablation gain over the rest of the group---group-relative credit in the spirit of GRPO~\citep{shao2024deepseekmath}, computed against the verifier-pruned union rather than against raw scores.
-A clause is \emph{useful} if it uniquely rejects at least one unit no other clause of the rollout rejects; with $\mathrm{junk}(A) = 1 - \mathrm{useful}(A)/|A|$, the reward is
-\begin{equation}
-r(A) \;=\; \max\bigl(0,\; w_b \,\mathrm{base}(A) + w_m \,\mathrm{marg}(A) - w_j \,\mathrm{junk}(A)\bigr),
-\qquad (w_b, w_m, w_j) = (0.5,\, 0.5,\, 0.05).
-\label{eq:reward}
-\end{equation}
-The group additionally receives $\mathrm{batch} = |\mathrm{rej}(\mathrm{surv}(U))| / n$ and a re-roll flag when $\mathrm{batch} < 0.6$.
+where $U = \bigcup_{A \in \mathcal{A}} A$ is the group union, and the reward is the weighted sum $r(A) = w_b\,\mathrm{base}(A) + w_m\,\mathrm{marg}(A)$ (we use $w_b = w_m = 0.5$).
+Base measures how much of the impossible space the rollout alone excludes; the marginal term is its ablation gain over the rest of the group --- group-relative credit in the spirit of GRPO~\citep{shao2024deepseekmath}.
+The marginal term also protects test-time diversity: repeated sampling is known to place correct invariants in the candidate pool~\citep{chakraborty2023ranking,wu2024lam4inv}, while RL fine-tuning tends to sharpen the sampling distribution~\citep{yue2025does}; since $\mathrm{marg}$ pays only for what the rest of the group does not already exclude, rollouts restating one another earn nothing, and the group optimum is a set of complementary summaries.
+Rejection tests are pure Python with C integer semantics (matching the compiled traces), so the only heavyweight cost is the prover; the distinct clause sets a group needs (per-rollout, union, ablations) are memoized and verified in parallel, and each WP run discharges its goals concurrently.
+The group additionally receives $\mathrm{batch} = |\mathrm{rej}(\mathrm{surv}(U))| / |\mathcal{N}|$ and a re-roll flag when it falls below a threshold.
 
-\paragraph{Step 3: multi-seed minimum.}
-Scores are computed against $s{=}2$ independent example sets plus $h{=}1$ \emph{holdout} set drawn with a fresh seed per reward call, and each rollout's final $\mathrm{base}/\mathrm{marg}/r$ is the \emph{minimum} across sets.
-A true invariant is indifferent to the sampling seed; anything fitted to one concrete sample is not, and the minimum ensures memorizing any single deterministic sample earns nothing.
-
-Negative rejection is evaluated by a locked-down predicate evaluator with C integer semantics (truncation-toward-zero division and remainder, matching the compiled traces), so the reward needs no SMT call on its hot path; the only heavyweight cost is Houdini, bounded by $G{+}1$ pruner runs per group and cut further by memoization and a lite-to-full filter cascade.
-
-%% ============================================================
-\subsection{Anti-Hacking Defenses}
-\label{sec:method:antihack}
-
-Because the reward is computed from a finite sample, ``memorize the sample'' is always an available policy; we enumerate the attack surface and close each vector, treating hack resistance as a specification with its own regression gates ($\S$\ref{sec:experiments}).
-
-\begin{itemize}[leftmargin=1.5em, itemsep=3pt, topsep=2pt]
-\item \textbf{Mega-conjunction} (one gate-compliant clause enumerating the negative pool): blocked by the per-clause complexity gate (160 chars / 12 atoms, drop-not-truncate).
-\item \textbf{Split spray} (hundreds of small $v \ne c$ clauses): blocked by a \emph{rollout atom budget}---only the emission-order prefix within 32 total atoms is scored.
-Honest summaries (3--6 clauses of 1--4 atoms) fit with headroom; a spray sacrifices its budget for clauses the next defense zeroes out.
-\item \textbf{Gold-plus-spray} (ride one true clause, pad with shadows): the junk term of Eq.~\ref{eq:reward} discounts clauses that reject nothing uniquely, so padding strictly lowers reward.
-\item \textbf{Sample-extreme boxes} ($lo \le v \le hi$ read off the observed range): the holdout seed's \emph{far probes} give each seed a different input envelope, so a box fitted to canonical extremes is falsified by holdout positives (dropped in survival) or misses holdout negatives; a symbolic bound ($x \le n$) is envelope-indifferent.
-\item \textbf{Pointwise memorization} ($v \ne c$ farms aimed at negative clusters): \emph{tier jitter} (seed-hashed $\pm2$ on non-edge tiers, uniform within a run so coupled preconditions stay satisfiable) decorrelates sampled values across seeds, and bound-negative offsets are themselves seed-hashed; the cross-seed minimum then zeroes the farm.
-\item \textbf{Slice concentration} (many negatives sharing one farm-targetable coordinate): a slice cap ($\le 6$ units per never-seen-positive coordinate value) bounds what any 32-atom farm can reach.
-\item \textbf{Dimension starvation} (score $\approx 1$ on relations while ignoring bounds): relation units are capped at twice the bound units, so bounds carry a program-independent share of the reward.
-\end{itemize}
-
-The defenses compose: capacity limits make memorization expensive, uniqueness accounting makes it unpaid, and cross-seed minimum scoring makes it worthless even if afforded.
-$\S$\ref{sec:experiments} validates the composition adversarially.
-
-%% ============================================================
+%% ------------------------------------------------------------
 \subsection{Inference: Closed-Book Generation with Certified Repair}
 \label{sec:method:inference}
 
-At inference time the policy is prompted with the program \emph{after postcondition stripping} (closed-book): the prompt asks for the strongest inductive ACSL loop invariants capturing the loop's behavior---conservation and relational laws plus tight progress bounds---emitted only as \texttt{loop invariant} lines.
-The system prompt encodes the Frama-C/WP practicalities: one core relational equality, minimal bounds, exact \texttt{loop assigns}, no tautologies, non-strict weakening of strict guards at exit, and pre-state references via \texttt{\textbackslash at(v,Pre)} for parameters only.
-
-For each program the framework samples $n$ rollouts (cloud API or in-process batched vLLM), unions and deduplicates their clauses, and applies the same survival cascade as the reward---ending, here, in full Houdini pruning and Frama-C/WP verification of the re-annotated program.
-Repair is thus Houdini-style subtraction rather than conversational self-correction: unsound clauses are dropped by the pruner, not re-prompted.
-If verification fails, the framework re-rolls up to a bounded number of attempts, keeping the best result by (verified, summary size).
-Training and inference share one canonical sampler configuration, so the reward optimized during RL is exactly the quantity the deployed pipeline measures.
+At inference time the policy is prompted with the program after postcondition stripping and asked for the strongest inductive ACSL loop invariants.
+The framework unions the clauses of $n$ rollouts, deduplicates, and applies the same cascade as the reward --- syntax scrub, pre-filter, Houdini --- ending in Frama-C/WP verification of the re-annotated program.
+Repair is Houdini-style subtraction rather than conversational self-correction: unsound clauses are dropped by the pruner, not re-prompted; on failure the framework re-rolls a bounded number of times.
+Training and inference share one canonical sampler configuration and one filter cascade, so the reward optimized during RL is exactly the quantity the deployed pipeline measures.

@@ -128,7 +128,13 @@ class HoudiniPruner:
 
         Returns:
             剪枝后的代码和验证状态元组 (code, is_valid)，如果所有不变量都被删除则返回 (None, False)
+
+        kwargs:
+            record: 可选 dict。传入时逐轮追加 record['rounds'] = [{'invariants': [...],
+                    'validate_result': [...]}]（位置一一对应）。第 0 轮的 False 项是
+                    "铁拒"——以全集为归纳假设仍失败；之后轮次的 False 多为陪葬者。
         """
+        record = kwargs.get('record')
         # 验证输入代码是完整的函数
         if not code or not code.strip():
             self.logger.error("Houdini received empty code")
@@ -173,6 +179,12 @@ class HoudiniPruner:
 
             # 获取验证结果
             validate_result = verifier.validate_result
+
+            if record is not None:
+                record.setdefault('rounds', []).append({
+                    'invariants': self._extract_invariants_from_code(current_code),
+                    'validate_result': list(validate_result or []),
+                })
 
             if not validate_result:
                 break

@@ -28,7 +28,7 @@ relation:bound & $\le 2:1$ & dimension balancing \\
 \midrule
 complexity gate & 160 chars / 12 atoms & per-clause capacity limit (drop, not truncate) \\
 rollout atom budget & 32 & total atoms scored per rollout (prefix) \\
-$(w_b, w_m, w_j)$ & $(0.5, 0.5, 0.05)$ & base / marginal / junk weights (Eq.~\ref{eq:reward}) \\
+$(w_b, w_m)$ & $(0.5, 0.5)$ & base / marginal weights (\S\ref{sec:method:reward}) \\
 seeds / holdout & 2 / 1 & minimum-combined example sets \\
 re-roll threshold & 0.6 & group batch score below which re-rolling is advised \\
 positive subsample & 4096 & per-set cap; per-variable extremes always retained \\
@@ -37,7 +37,7 @@ Houdini iterations & $\le 500$, patience 2 & greatest-inductive-subset pruning \
 WP configuration & Z3, 30\,s, Typed model & per-goal prover budget \\
 \bottomrule
 \end{tabular}
-\caption{Canonical constants of the sampler ($\S$\ref{sec:method:sampler}), reward ($\S$\ref{sec:method:reward}--$\S$\ref{sec:method:antihack}), and verification backend.}
+\caption{Canonical constants of the sampler ($\S$\ref{sec:method:sampler}), reward ($\S$\ref{sec:method:reward}--$\S$\ref{sec:method:reward}), and verification backend.}
 \label{tab:constants}
 \end{table}
 

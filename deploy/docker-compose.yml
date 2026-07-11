@@ -5,7 +5,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.reward
-    image: sam2inv-reward
+    image: loopgym-reward
     ports:
       - "8000:8000"
     environment:

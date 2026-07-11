@@ -74,13 +74,22 @@ class BaseChatModel(ABC):
         # Single deterministic prompt — no CoT.
         self._cot_mode = False
         prompt_filename = getattr(config, 'system_prompt_file', 'system_prompt.txt')
-        system_prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', prompt_filename)
-        try:
-            with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                system_prompt = f.read()
-        except Exception as e:
+        # canonical location: <repo-root>/prompt/ (all prompts are maintained there);
+        # src/prompts/ kept as a legacy fallback
+        _here = os.path.dirname(__file__)
+        candidates = [os.path.join(_here, '..', 'prompt', prompt_filename),
+                      os.path.join(_here, 'prompts', prompt_filename)]
+        system_prompt = None
+        for system_prompt_path in candidates:
+            try:
+                with open(system_prompt_path, 'r', encoding='utf-8') as f:
+                    system_prompt = f.read()
+                break
+            except Exception:
+                continue
+        if system_prompt is None:
             system_prompt = "You are a helpful assistant."
-            print(f"Warning: Failed to load system prompt from {system_prompt_path}: {e}")
+            print(f"Warning: Failed to load system prompt from any of {candidates}")
         self.messages = [{"role": "system", "content": system_prompt}]
 
     @abstractmethod

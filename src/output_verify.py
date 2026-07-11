@@ -171,6 +171,8 @@ class OutputVerifier:
         self.verify_result = []
         self.validate_result = []
         self.validate_result_by_line = {}
+        # line -> {'Establishment': bool, 'Preservation': bool}（check_valid_pairs 填充）
+        self.goal_status_by_line = {}
 
     def print_errors(self, error_list):
         for error in error_list:
@@ -280,7 +282,11 @@ class OutputVerifier:
             ok = bool(status['Establishment'] and status['Preservation'])
             results.append(ok)
             line_results[line] = ok
-        
+
+        # 暴露逐行的 Establishment/Preservation 细节（供反馈生成区分
+        # "入口不成立" vs "迭代不保持"）
+        self.goal_status_by_line = inv_status
+
         return results, line_results
 
     def check_verify_target(self, filter_contents):
@@ -335,17 +341,19 @@ class OutputVerifier:
                 # 根据不变量数量设置 validate_result
                 self.validate_result = [False] * num_invariants if num_invariants > 0 else [False]
                 self.validate_result_by_line = {}
+                self.goal_status_by_line = {}
             except:
                 # 如果提取失败，使用默认值
                 self.validate_result = [False]
                 self.validate_result_by_line = {}
+                self.goal_status_by_line = {}
         else:
             self.syntax_correct = True
             frama_c_command = "frama-c"
             # 确保使用绝对路径
             abs_file_path = os.path.abspath(file_path) if not os.path.isabs(file_path) else file_path
             # Use a longer timeout to reduce false negatives on nonlinear VCs.
-            wp_command = [frama_c_command, "-wp", "-wp-print", "-wp-timeout", "30", "-wp-prover", "z3", "-wp-model", "Typed", abs_file_path]
+            wp_command = [frama_c_command, "-wp", "-wp-print", "-wp-timeout", "30", "-wp-par", "8", "-wp-prover", "z3", "-wp-model", "Typed", abs_file_path]
             try:
                 result = subprocess.run(wp_command, capture_output=True, text=True, check=True)
                 spliter = '------------------------------------------------------------'
@@ -394,6 +402,7 @@ class OutputVerifier:
                 self.logger.error(self.syntax_error)
                 self.validate_result = [False]
                 self.validate_result_by_line = {}
+                self.goal_status_by_line = {}
                 self.verify_result = [False]
 
 if __name__ == "__main__":

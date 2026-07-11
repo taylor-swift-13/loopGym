@@ -1,4 +1,4 @@
-# SAM2INV — Inference image (testing): vLLM + Frama-C, self-contained.
+# LoopGym — Inference image (testing): vLLM + Frama-C, self-contained.
 #
 # Deploys a TRAINED model to an in-process vLLM engine and runs inference over a
 # set of C programs:  sample → generate (vLLM) → positive-filter → combine →
@@ -8,11 +8,11 @@
 # frama-c.  Based on the official vLLM image (CUDA + vLLM already present).
 #
 # Build (context = repo root):
-#   docker build -f deploy/Dockerfile.inference -t sam2inv-inference .
+#   docker build -f deploy/Dockerfile.inference -t loopgym-inference .
 # Run (mount the trained model and the test programs):
 #   docker run --gpus all --rm \
 #     -v /path/to/model:/model -v /path/to/programs:/data \
-#     sam2inv-inference --model /model --inputs '/data/*.c' --n-rollouts 8 --output /data/out.jsonl
+#     loopgym-inference --model /model --inputs '/data/*.c' --n-rollouts 8 --output /data/out.jsonl
 FROM vllm/vllm-openai:latest
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
@@ -33,8 +33,8 @@ COPY rl_pipeline/ /app/rl_pipeline/
 # --- src modules the HoudiniFilter / verifier reuse ---
 COPY src/config.py src/houdini_pruner.py src/unified_filter.py \
      src/output_verify.py src/syntax_checker.py src/run_dirs.py /app/src/
-# --- system prompt read by the vLLM rollout provider ---
-COPY src/prompts/ /app/src/prompts/
+# --- prompts (single source of truth: generate/refine/system) ---
+COPY prompt/ /app/prompt/
 
 # Build-time check: gcc sampling works and the real-Houdini cascade is wired.
 RUN python3 -c "import sys; sys.path.insert(0,'src'); \

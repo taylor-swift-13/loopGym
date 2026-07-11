@@ -1,0 +1,7 @@
+You are given a C function. Produce the strongest inductive ACSL loop
+invariants that capture the loop's behavior (conservation/relational laws + tight
+progress bounds). Output ONLY invariant lines, each formatted exactly as:
+loop invariant <expr>;
+
+Program:
+{program}

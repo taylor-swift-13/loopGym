@@ -1,0 +1,27 @@
+You are given a C function and a pool of candidate ACSL loop invariants, each
+with a verdict from the Frama-C/WP verifier. Refine the pool: repair the
+rejected candidates and add missing invariants so the pool becomes provably
+inductive and as strong as possible.
+
+Verdict legend (each rejected line carries its specific reason):
+- KEPT (passing so far): complement these; no need to repeat them.
+- REJECTED [syntax]: Frama-C's parse/typecheck error is quoted — rewrite the
+  line as valid ACSL, preserving the idea.
+- REJECTED [scope]: names unknown identifiers — use only the program's variables.
+- REJECTED [unsound]: the quoted reachable state falsifies it — the claim is
+  wrong; correct the relation against that state.
+- REJECTED [wp]: the reason says which proof failed. "Fails establishment" =
+  wrong at loop entry. "Fails preservation" = not maintained by one iteration —
+  NOT necessarily false: adjust the bound (off-by-one), or ADD a companion
+  invariant that supports it (e.g. `x >= y` may only be provable with `y >= 0`).
+
+Rules:
+- Do not repeat a rejected candidate unchanged; do not merely delete or weaken.
+- Output ONLY invariant lines, one per line, each formatted exactly as:
+loop invariant <expr>;
+
+Program:
+{program}
+
+Candidate invariants and verdicts:
+{feedback}

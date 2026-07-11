@@ -172,31 +172,6 @@ def _compile(expr: str):
     return code
 
 
-def eval_int(expr: str, state: "State") -> Optional[int]:
-    """Evaluate an integer-valued ACSL-ish expression at `state` (same
-    machinery as eval_predicate); None when it cannot be grounded."""
-    if not expr or not expr.strip():
-        return None
-    try:
-        code = _compile(expr)
-    except SyntaxError:
-        return None
-    ns: Dict[str, int] = {k: int(v) for k, v in state.vars.items()}
-    for k, v in state.pre.items():
-        ns[f"{k}__PRE__"] = int(v)
-    allowed = set(ns.keys()) | {"True", "False", "None", "bool", "abs",
-                                "__cdiv__", "__cmod__"}
-    for nm in getattr(code, "co_names", ()):
-        if nm not in allowed:
-            return None
-    ns.update(abs=abs, bool=bool, __cdiv__=_c_div, __cmod__=_c_mod)
-    try:
-        result = eval(code, _SAFE_GLOBALS, ns)  # noqa: S307 - locked-down namespace
-    except Exception:
-        return None
-    return int(result) if isinstance(result, (int, bool)) else None
-
-
 def eval_predicate(expr: str, state: "State") -> Optional[bool]:
     """
     Evaluate an ACSL boolean predicate at `state`.

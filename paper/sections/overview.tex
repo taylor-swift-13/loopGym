@@ -44,7 +44,7 @@ Compiles and executes the instrumented loop over a deterministic, precondition-r
 The sampler sees only $(\phi_{\mathrm{pre}}, B, S)$---never the postcondition.
 \end{stepbox}
 
-\begin{stepbox}[2. Reward framework (\S\ref{sec:method:reward}--\S\ref{sec:method:antihack})]
+\begin{stepbox}[2. Reward framework (\S\ref{sec:method:reward})]
 Scores a \emph{group} of rollouts (candidate clause sets sampled for the same program, as in group-relative RL~\citep{shao2024deepseekmath}).
 Each rollout is reduced to its surviving inductive core, then scored by the fraction of negative traces it rejects (base), its ablation gain over the rest of the group (marginal), and a junk discount; scores are minimized across independent and held-out sampling seeds.
 Packaged as a slim containerized HTTP service (\texttt{POST /reward}) so any RL trainer can consume it, plus an offline JSONL/Parquet scorer.

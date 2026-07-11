@@ -10,6 +10,10 @@ Invariant filters — reduce a candidate invariant set to the ones that "survive
                      when frama-c is unavailable.
 
 Both expose the same interface:  filter(prog, loop_idx, invariants, positives) -> List[str]
+and a verdict-returning variant:
+  filter_verdicts(...) -> (survivors, List[Verdict])   # per-invariant keep/drop + reason
+HoudiniFilter additionally offers precheck() — syntax scrub + ONE WP round (no
+fixpoint), the cheap feedback source for the refine loop.
 """
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ import os
 import re
 import shutil
 import tempfile
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 from ..common.program import Program
 from ..common.state import State, eval_predicate, normalize_invariant, extract_invariants
@@ -28,23 +33,49 @@ from . import annotate
 _ACSL_STOPWORDS = {"at", "Pre", "Post", "old", "result", "true", "false",
                    "True", "False", "None", "and", "or", "not"}
 
-# Complexity gate: a real loop invariant is a short law (the longest honest ones
-# in the benchmark suite are ~80 chars / a handful of atoms).  Without a cap, a
-# policy can memorize the sampled negative set into ONE mega-predicate
-# (`!(x==1 && y==2) && !(x==3 && ...)`) that rejects every negative while being
-# semantically empty — the ultimate reward hack.  Oversized candidates are
-# dropped, not truncated.
-_MAX_INV_CHARS = 160
-_MAX_INV_ATOMS = 12
-_ATOM_RE = re.compile(r"==|!=|<=|>=|<|>")
-
-
-def too_complex(inv: str) -> bool:
-    return len(inv) > _MAX_INV_CHARS or len(_ATOM_RE.findall(inv)) > _MAX_INV_ATOMS
-
-
 def frama_c_available() -> bool:
     return shutil.which("frama-c") is not None
+
+
+@dataclass
+class Verdict:
+    """Per-invariant filter outcome.  `stage` values:
+      scope    — unparsable / names out-of-scope identifiers
+      unsound  — violated by a sampled reachable state
+      syntax   — Frama-C rejects it (parse/typecheck)
+      wp       — failed the WP precheck; the reason states WHICH proof broke:
+                 establishment (false at loop entry) or preservation (not
+                 maintained by one iteration, with the pool as hypothesis —
+                 pool-relative: a new companion can rescue it)
+      houdini  — pruned in a later round (casualty: lost its supporting invariants),
+                 or kept=True for survivors
+    Reasons are target-free (never mention the assert/postcondition) so they can
+    be fed back to a closed-book model."""
+    invariant: str
+    kept: bool
+    stage: str
+    reason: str
+
+
+def precheck_stage(flt):
+    """The stage of `flt` that offers precheck() (HoudiniFilter), or None."""
+    if hasattr(flt, "precheck"):
+        return flt
+    for st in getattr(flt, "stages", []):
+        if hasattr(st, "precheck"):
+            return st
+    return None
+
+
+def build_feedback(verdicts: List["Verdict"]) -> str:
+    """Render verdicts as the table prompt/refine_prompt.txt expects (never raw
+    Frama-C output; reasons are target-free by construction)."""
+    lines = []
+    for v in verdicts:
+        tag = ("KEPT (passing so far)" if v.kept
+               else f"REJECTED [{v.stage}]: {v.reason}")
+        lines.append(f"loop invariant {v.invariant};   -- {tag}")
+    return "\n".join(lines)
 
 
 def out_of_scope_ids(inv: str, allowed) -> List[str]:
@@ -88,12 +119,6 @@ def representative_positives(positives: List[State]) -> List[State]:
 # adversary who knows the (deterministic) subsample stride can pick constants
 # from the skipped states — sound-looking on the subsample, unsound in truth,
 # and still rejecting negatives that share those values.
-_DISEQ_RE = re.compile(r"^\s*(?:!\s*\(\s*(\w+)\s*==\s*(-?\d+)\s*\)|(\w+)\s*!=\s*(-?\d+))\s*$")
-# window-exclusion fast path: `!(A <= v && v <= B)` — exact at any value-set size
-_IVAL_RE = re.compile(
-    r"^\s*!\s*\(\s*(-?\d+)\s*<=?\s*(\w+)\s*&&\s*(\w+)\s*<=?\s*(-?\d+)\s*\)\s*$")
-# generic single-var exact check is an eval per observed value — cap the scan
-_MAX_EXACT_VALUES = 20000
 
 
 class PositiveFilter:
@@ -119,58 +144,35 @@ class PositiveFilter:
 
     def filter(self, prog: Program, loop_idx: int, invariants: List[str],
                positives: Optional[List[State]] = None) -> List[str]:
+        return self.filter_verdicts(prog, loop_idx, invariants, positives)[0]
+
+    def filter_verdicts(self, prog: Program, loop_idx: int, invariants: List[str],
+                        positives: Optional[List[State]] = None
+                        ) -> Tuple[List[str], List[Verdict]]:
         sample, values = self._positives(positives or [])
         kept: List[str] = []
+        verdicts: List[Verdict] = []
         for inv in invariants:
             cond = normalize_invariant(inv)
             if not cond:
-                continue
-            # complexity gate: drop memorization-sized predicates (see too_complex)
-            if too_complex(cond):
+                verdicts.append(Verdict(inv, False, "scope", "unparsable invariant"))
                 continue
             # scope gate: reject invariants naming out-of-scope identifiers
             # (Frama-C would reject them, and an undeclared name can break parsing
             #  of the whole file).
-            if out_of_scope_ids(cond, prog.pre_vars):
+            bad = out_of_scope_ids(cond, prog.pre_vars)
+            if bad:
+                verdicts.append(Verdict(cond, False, "scope",
+                                        "out-of-scope identifiers: " + ", ".join(sorted(set(bad)))))
                 continue
-            # single-variable predicates get an EXACT check against all
-            # observed values of that variable (see comment on _DISEQ_RE)
-            if self._exact_single_var_unsound(cond, values):
+            witness = next((s for s in sample if eval_predicate(cond, s) is False), None)
+            if witness is not None:
+                verdicts.append(Verdict(cond, False, "unsound",
+                                        f"false at the reachable state ({witness.render()})"))
                 continue
-            unsound = any(eval_predicate(cond, s) is False for s in sample)
-            if not unsound:
-                kept.append(cond)
-        return kept
-
-    @staticmethod
-    def _exact_single_var_unsound(cond: str, values: dict) -> bool:
-        """True iff `cond` constrains a single program variable and some
-        OBSERVED value of that variable falsifies it.  Fast paths for the two
-        farm shapes (`v != c`, `!(a <= v && v <= b)`), generic per-value eval
-        for everything else (modular tricks, shifted windows, …)."""
-        m = _DISEQ_RE.match(cond)
-        if m:
-            v, c = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
-            return int(c) in values.get(v, ())
-        m = _IVAL_RE.match(cond)
-        if m and m.group(2) == m.group(3):
-            v = m.group(2)
-            a, b = int(m.group(1)), int(m.group(4))
-            vv = values.get(v)
-            return bool(vv) and any(a <= val <= b for val in vv)
-        if "\\" in cond:                     # \at(...) references the pre-state
-            return False
-        ids = set(re.findall(r"[A-Za-z_]\w*", cond)) - _ACSL_STOPWORDS
-        prog_ids = [i for i in ids if i in values]
-        if len(prog_ids) != 1 or len(ids) != 1:
-            return False
-        v = prog_ids[0]
-        vv = values[v]
-        if len(vv) > _MAX_EXACT_VALUES:      # fall back to the state subsample
-            return False
-        return any(eval_predicate(cond, State(vars={v: val}, pre={})) is False
-                   for val in vv)
-
+            kept.append(cond)
+            verdicts.append(Verdict(cond, True, "positive", "passing so far"))
+        return kept, verdicts
 
 class HoudiniFilter:
     """Inductive filtering with Frama-C/WP (reuses src/ HoudiniPruner + OutputVerifier)."""
@@ -191,29 +193,244 @@ class HoudiniFilter:
 
     def filter(self, prog: Program, loop_idx: int, invariants: List[str],
                positives: Optional[List[State]] = None) -> List[str]:
-        invs = [normalize_invariant(i) for i in invariants if normalize_invariant(i)]
+        return self.filter_verdicts(prog, loop_idx, invariants, positives)[0]
+
+    def filter_verdicts(self, prog: Program, loop_idx: int, invariants: List[str],
+                        positives: Optional[List[State]] = None
+                        ) -> Tuple[List[str], List[Verdict]]:
+        verdicts: List[Verdict] = []
+        invs: List[str] = []
+        for i in invariants:
+            cond = normalize_invariant(i)
+            if cond:
+                invs.append(cond)
+            else:
+                verdicts.append(Verdict(i, False, "scope", "unparsable invariant"))
         # cheap positive pre-filter first (mirrors the inference pipeline)
         if self.prefilter_positives and positives:
-            invs = self._positive.filter(prog, loop_idx, invs, positives)
+            invs, pv = self._positive.filter_verdicts(prog, loop_idx, invs, positives)
+            verdicts += [v for v in pv if not v.kept]
         if not invs:
-            return []
+            return [], verdicts
+        invs, syn_verdicts = self._scrub_verdicts(prog, loop_idx, invs)
+        verdicts += syn_verdicts
+        if not invs:
+            return [], verdicts
         code = annotate.build_annotated(prog, invs, loop_idx)
         tmpdir = tempfile.mkdtemp(prefix="rlreward_")
         cpath = os.path.join(tmpdir, "prog.c")
+        record: dict = {}
         try:
             with open(cpath, "w") as f:
                 f.write(code)
             verifier = self._OutputVerifier(logger=self.log)
             pruner = self._HoudiniPruner(logger=self.log)
-            pruned_code, _valid = pruner.hudini(code, verifier, cpath)
-            if not pruned_code:
-                return []
-            return extract_invariants(pruned_code)
+            pruned_code, _valid = pruner.hudini(code, verifier, cpath, record=record)
+            survivors = extract_invariants(pruned_code) if pruned_code else []
         except Exception as e:  # frama-c hiccup -> conservative empty
             self.log.warning("Houdini filter failed: %s", e)
-            return []
+            verdicts += [Verdict(i, False, "houdini", "frama-c error during Houdini")
+                         for i in invs]
+            return [], verdicts
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+        verdicts += self._houdini_verdicts(invs, survivors, record)
+        return survivors, verdicts
+
+    @staticmethod
+    def _houdini_verdicts(invs: List[str], survivors: List[str], record: dict) -> List[Verdict]:
+        """Attribute each pruned invariant: round-0 failure = iron reject (stage
+        "wp"), later rounds = casualty of losing support (stage "houdini")."""
+        surv = {normalize_invariant(s) for s in survivors}
+        iron = set()
+        rounds = record.get("rounds") or []
+        if rounds:
+            r0_invs, r0_ok = rounds[0]["invariants"], rounds[0]["validate_result"]
+            for inv, ok in zip(r0_invs, r0_ok):   # positional, same order as source
+                if not ok:
+                    iron.add(normalize_invariant(inv))
+        out: List[Verdict] = []
+        for inv in invs:
+            key = normalize_invariant(inv)
+            if key in surv:
+                out.append(Verdict(inv, True, "houdini", "inductive (survived Houdini)"))
+            elif key in iron:
+                out.append(Verdict(inv, False, "wp",
+                                   "not inductive with the current set — it may need "
+                                   "a companion invariant to support it"))
+            else:
+                out.append(Verdict(inv, False, "houdini",
+                                   "pruned in a later Houdini round (its supporting "
+                                   "invariants were removed)"))
+        return out
+
+    def _scrub_verdicts(self, prog: Program, loop_idx: int, invs: List[str]
+                        ) -> Tuple[List[str], List[Verdict]]:
+        dropped: List[Tuple[str, str]] = []
+        kept = self._syntax_scrub(prog, loop_idx, invs, dropped=dropped)
+        return kept, [Verdict(d, False, "syntax", f"frama-c: {msg}")
+                      for d, msg in dropped]
+
+    def precheck(self, prog: Program, loop_idx: int, invariants: List[str]
+                 ) -> List[Verdict]:
+        """Cheap refine-feedback pass: syntax scrub + at most TWO WP rounds, no
+        fixpoint.  Two rounds because an establishment failure makes WP's
+        preservation hypotheses inconsistent (the entry state contradicts the
+        assumed invariant), turning every OTHER preservation goal vacuously
+        Valid — so pass 1 harvests the establishment verdicts (independent,
+        hence reliable), and pass 2 re-checks preservation with the
+        entry-failing candidates removed.  Every rejection carries its
+        specific WHY.  Rejections are pool-relative (new companions can rescue
+        them); a pass is only "passing so far", NOT proven inductive."""
+        verdicts: List[Verdict] = []
+        invs: List[str] = []
+        for i in invariants:
+            cond = normalize_invariant(i)
+            if cond:
+                invs.append(cond)
+            else:
+                verdicts.append(Verdict(i, False, "scope", "unparsable invariant"))
+        if not invs:
+            return verdicts
+        invs, syn_verdicts = self._scrub_verdicts(prog, loop_idx, invs)
+        verdicts += syn_verdicts
+        if not invs:
+            return verdicts
+
+        ok1, status1 = self._wp_round(prog, loop_idx, invs)
+        est_failed = [inv for inv in invs
+                      if (status1.get(inv) or {}).get("Establishment") is False]
+        for inv in est_failed:
+            verdicts.append(Verdict(inv, False, "wp",
+                                    "fails establishment: it does not hold when the "
+                                    "loop is first reached — check it against the "
+                                    "initialization"))
+        rest = [inv for inv in invs if inv not in est_failed]
+        if not rest:
+            return verdicts
+        if est_failed:   # pass 2: honest preservation without the vacuous-truth mask
+            ok2, status2 = self._wp_round(prog, loop_idx, rest)
+        else:
+            ok2, status2 = ok1, status1
+        for inv in rest:
+            if ok2.get(inv, True):
+                verdicts.append(Verdict(inv, True, "wp", "passing so far"))
+                continue
+            st = status2.get(inv) or {}
+            if st.get("Preservation") is False:
+                reason = ("fails preservation: one loop iteration does not "
+                          "maintain it (even assuming the whole pool) — adjust it "
+                          "to the loop's step, or add a companion invariant that "
+                          "supports it")
+            else:
+                reason = ("not inductive with the current set — it may need a "
+                          "companion invariant to support it")
+            verdicts.append(Verdict(inv, False, "wp", reason))
+        return verdicts
+
+    def _wp_round(self, prog: Program, loop_idx: int, invs: List[str]
+                  ) -> Tuple[dict, dict]:
+        """ONE WP run over `invs`.  Returns (ok, status): ok maps invariant ->
+        combined bool (missing entries treated as passing); status maps
+        invariant -> {'Establishment': bool, 'Preservation': bool} where the
+        goal split could be line-mapped."""
+        code = annotate.build_annotated(prog, invs, loop_idx)
+        tmpdir = tempfile.mkdtemp(prefix="rlwp_")
+        cpath = os.path.join(tmpdir, "prog.c")
+        vr: List[bool] = []
+        by_line: dict = {}
+        try:
+            with open(cpath, "w") as f:
+                f.write(code)
+            verifier = self._OutputVerifier(logger=self.log)
+            verifier.run(cpath)
+            vr = list(verifier.validate_result or [])
+            by_line = dict(getattr(verifier, "goal_status_by_line", {}) or {})
+        except Exception as e:
+            self.log.warning("WP round failed: %s", e)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        if len(vr) != len(invs):   # unmappable -> conservative: passing so far
+            if vr:
+                self.log.warning("WP round: %d results for %d invariants; "
+                                 "treating unmapped as passing", len(vr), len(invs))
+            vr = vr[:len(invs)] + [True] * (len(invs) - len(vr))
+        inv_line = {}
+        for ln, text in enumerate(code.splitlines(), 1):
+            for inv in invs:
+                if f"loop invariant {inv};" in text:
+                    inv_line[inv] = ln
+        ok = dict(zip(invs, vr))
+        status = {inv: by_line[inv_line[inv]] for inv in invs
+                  if inv in inv_line and inv_line[inv] in by_line}
+        return ok, status
+
+
+    def _syntax_scrub(self, prog: Program, loop_idx: int, invs: List[str],
+                      dropped: Optional[List[Tuple[str, str]]] = None) -> List[str]:
+        """Drop `loop invariant` entries FRAMA-C rejects (parse/typecheck): one
+        kernel-only run per round; the error's line number maps back to the
+        offending entry (each sits on its own line).  An unmappable error falls
+        back to per-clause checks.  `dropped`, if given, collects
+        (entry, frama-c error text) pairs — the WHY for refine feedback."""
+        import subprocess
+
+        def kernel_error(code: str):
+            """None if clean, else (line or -1, first error message line)."""
+            tmpdir = tempfile.mkdtemp(prefix="rlsyn_")
+            cpath = os.path.join(tmpdir, "prog.c")
+            try:
+                with open(cpath, "w") as f:
+                    f.write(code)
+                res = subprocess.run(["frama-c", cpath], capture_output=True,
+                                     text=True, timeout=30)
+                err = res.stdout + res.stderr
+                if res.returncode == 0 and "user error" not in err:
+                    return None                       # parses clean
+                # frama-c wraps long messages onto indented continuation lines
+                m = re.search(rf"{re.escape(cpath)}:(\d+):\s*([^\n]*(?:\n[ \t]+[^\n]*)*)", err)
+                if m:
+                    msg = re.sub(r"\s+", " ", m.group(2)).strip()
+                    msg = re.sub(r"^Warning:\s*", "", msg)
+                    return int(m.group(1)), msg[:120]
+                return -1, ""                         # error, no line info
+            except Exception:
+                return -1, ""
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        def note(inv: str, msg: str):
+            self.log.info("syntax scrub (frama-c): dropping %r (%s)", inv, msg)
+            if dropped is not None:
+                dropped.append((inv, msg or "parse/typecheck error"))
+
+        invs = list(invs)
+        for _ in range(len(invs) + 1):
+            if not invs:
+                return []
+            code = annotate.build_annotated(prog, invs, loop_idx)
+            hit_err = kernel_error(code)
+            if hit_err is None:
+                return invs
+            line, msg = hit_err
+            if line > 0:
+                text = code.splitlines()[line - 1]
+                hit = next((i for i in invs if i in text), None)
+                if hit is not None:
+                    note(hit, msg)
+                    invs.remove(hit)
+                    continue
+            # unmappable: per-clause fallback
+            self.log.info("syntax scrub: per-clause fallback over %d entries", len(invs))
+            kept = []
+            for i in invs:
+                res = kernel_error(annotate.build_annotated(prog, [i], loop_idx))
+                if res is None:
+                    kept.append(i)
+                else:
+                    note(i, res[1])
+            return kept
+        return invs
 
 
 class CascadeFilter:
@@ -234,6 +451,19 @@ class CascadeFilter:
                 break
             invs = st.filter(prog, loop_idx, invs, positives)
         return invs
+
+    def filter_verdicts(self, prog: Program, loop_idx: int, invariants: List[str],
+                        positives: Optional[List[State]] = None
+                        ) -> Tuple[List[str], List[Verdict]]:
+        invs = invariants
+        verdicts: List[Verdict] = []
+        for st in self.stages:
+            if not invs:
+                break
+            invs, vs = st.filter_verdicts(prog, loop_idx, invs, positives)
+            # keep drop verdicts from every stage; only the LAST stage's keeps count
+            verdicts = [v for v in verdicts if not v.kept] + vs
+        return invs, verdicts
 
 
 def auto_filter(logger: Optional[logging.Logger] = None):

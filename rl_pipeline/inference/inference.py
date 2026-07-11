@@ -21,6 +21,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from ..common import prompts
 from ..common.program import Program, parse_program, strip_postcondition
 from ..common.state import extract_invariants, dedup_normalized
 from ..reward import annotate
@@ -30,25 +31,32 @@ from ..reward import filters
 # ── rollout providers ────────────────────────────────────────────────────────
 
 class MockRolloutProvider:
-    """Returns pre-baked invariant sets; cycles if asked for more than provided."""
+    """Returns pre-baked invariant sets; cycles if asked for more than provided.
+    `refinements` (optional) are consumed one per refine() call, for tests."""
 
-    def __init__(self, rollouts: List[List[str]]):
+    def __init__(self, rollouts: List[List[str]], refinements: Optional[List[List[str]]] = None):
         self.rollouts = rollouts
+        self.refinements = list(refinements or [])
+        self._refine_calls = 0
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         if not self.rollouts:
             return [[] for _ in range(n)]
         return [list(self.rollouts[i % len(self.rollouts)]) for i in range(n)]
 
+    def refine(self, prog: Program, feedback: str, n: int = 1) -> List[List[str]]:
+        if self._refine_calls >= len(self.refinements):
+            return [[] for _ in range(n)]
+        out = [list(self.refinements[self._refine_calls]) for _ in range(n)]
+        self._refine_calls += 1
+        return out
 
-_PROMPT = """You are given a C function. Produce the strongest inductive ACSL loop
-invariants that capture the loop's behavior (conservation/relational laws + tight
-progress bounds). Output ONLY invariant lines, each formatted exactly as:
-loop invariant <expr>;
 
-Program:
-{program}
-"""
+# All prompt text lives in <repo-root>/prompt/*.txt (edit there, not here).
+# REFINE_PROMPT is stateless by design — see common/prompts.py.
+_PROMPT = prompts.GENERATE_PROMPT
+REFINE_PROMPT = prompts.REFINE_PROMPT
+build_feedback = filters.build_feedback     # re-export (training side imports it here)
 
 
 class LLMRolloutProvider:
@@ -81,10 +89,16 @@ class LLMRolloutProvider:
         return bot.chat
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
-        out: List[List[str]] = []
         # closed-book: hide the assert (goal) so the model can't restate it
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        prompt = _PROMPT.format(program=source)
+        return self._chat_n(_PROMPT.format(program=source), n)
+
+    def refine(self, prog: Program, feedback: str, n: int = 1) -> List[List[str]]:
+        source = strip_postcondition(prog.source) if self.hide_assert else prog.source
+        return self._chat_n(REFINE_PROMPT.format(program=source, feedback=feedback), n)
+
+    def _chat_n(self, prompt: str, n: int) -> List[List[str]]:
+        out: List[List[str]] = []
         for _ in range(n):
             try:
                 resp = self.chat_fn(prompt)
@@ -96,14 +110,7 @@ class LLMRolloutProvider:
 
 
 def _load_system_prompt() -> str:
-    from ..common import paths
-    src_dir = paths.ensure_src_on_path()
-    p = os.path.join(src_dir, "prompts", "system_prompt.txt")
-    try:
-        with open(p, encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return ""
+    return prompts.system_prompt()
 
 
 class VLLMRolloutProvider:
@@ -129,7 +136,14 @@ class VLLMRolloutProvider:
 
     def __call__(self, prog: Program, n: int) -> List[List[str]]:
         source = strip_postcondition(prog.source) if self.hide_assert else prog.source
-        messages = [{"role": "user", "content": _PROMPT.format(program=source)}]
+        return self._chat_n(_PROMPT.format(program=source), n)
+
+    def refine(self, prog: Program, feedback: str, n: int = 1) -> List[List[str]]:
+        source = strip_postcondition(prog.source) if self.hide_assert else prog.source
+        return self._chat_n(REFINE_PROMPT.format(program=source, feedback=feedback), n)
+
+    def _chat_n(self, prompt: str, n: int) -> List[List[str]]:
+        messages = [{"role": "user", "content": prompt}]
         if self.system_prompt:
             messages.insert(0, {"role": "system", "content": self.system_prompt})
         sp = self._SamplingParams(n=n, temperature=self.temperature,
@@ -155,14 +169,18 @@ class InferenceResult:
     n_rollouts: int
     rollouts: List[List[str]] = field(default_factory=list)
     filtered_rollouts: List[List[str]] = field(default_factory=list)
+    refine_rounds: int = 0        # LLM refine rounds actually run (<= m_refine)
 
 
 # ── framework ─────────────────────────────────────────────────────────────────
 
 class InferenceFramework:
-    """loop -> invariants.  Generate rollouts, union them, prune with real Houdini
-    (Frama-C/WP), verify with Frama-C.  INDEPENDENT of the reward component — it
-    does NOT sample positives/negatives (that is only the reward's job)."""
+    """loop -> invariants.  Generate rollouts, union them, optionally run m LLM
+    refine rounds on the merged pool (cheap WP precheck -> feedback -> refined
+    candidates JOIN the pool, originals kept), then prune with real Houdini
+    (Frama-C/WP) and verify with Frama-C.  m_refine=0 reproduces the plain
+    pipeline exactly.  INDEPENDENT of the reward component — it does NOT sample
+    positives/negatives (that is only the reward's job)."""
 
     def __init__(
         self,
@@ -172,6 +190,8 @@ class InferenceFramework:
         n_rollouts: int = 4,
         max_rerolls: int = 1,
         hide_assert: bool = True,
+        m_refine: int = 0,
+        refine_samples: int = 1,
         logger: Optional[logging.Logger] = None,
     ):
         self.source = source
@@ -182,6 +202,8 @@ class InferenceFramework:
         self.filter = invariant_filter or filters.auto_filter(logger)
         self.n_rollouts = n_rollouts
         self.max_rerolls = max_rerolls
+        self.m_refine = m_refine
+        self.refine_samples = refine_samples
         self.log = logger or logging.getLogger("rl_pipeline.inference")
 
     def _verify(self, annotated_code: str) -> Optional[bool]:
@@ -212,12 +234,47 @@ class InferenceFramework:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def _refine_loop(self, pool: List[str], loop_idx: int) -> tuple:
+        """m rounds of: WP precheck (syntax + ONE WP pass) -> verdict feedback ->
+        LLM refine -> refined candidates join the pool (originals kept: a later
+        companion can rescue an iron reject; the final full Houdini adjudicates).
+        Stops early when nothing is rejected or the pool reaches a fixpoint."""
+        stage = filters.precheck_stage(self.filter)
+        if stage is None:
+            self.log.warning("m_refine=%d but filter has no WP precheck stage "
+                             "(frama-c unavailable?); skipping refine", self.m_refine)
+            return pool, 0
+        refine_fn = getattr(self.provider, "refine", None)
+        if refine_fn is None:
+            self.log.warning("m_refine=%d but provider has no refine(); skipping",
+                             self.m_refine)
+            return pool, 0
+        rounds = 0
+        for _ in range(self.m_refine):
+            if not pool:
+                break
+            verdicts = stage.precheck(self.prog, loop_idx, pool)
+            if not any(not v.kept for v in verdicts):
+                break                                  # nothing to refine
+            feedback = build_feedback(verdicts)
+            refined = refine_fn(self.prog, feedback, self.refine_samples)
+            rounds += 1
+            new_pool = dedup_normalized(list(pool) + [c for r in refined for c in r])
+            if len(new_pool) == len(pool):
+                break                                  # fixpoint: no new candidates
+            self.log.info("refine round %d: pool %d -> %d", rounds, len(pool), len(new_pool))
+            pool = new_pool
+        return pool, rounds
+
     def _attempt(self):
         loop_idx = 0
         rollouts = self.provider(self.prog, self.n_rollouts)
         # combine (union) across all rollouts, then prune with real Houdini
         # (Frama-C/WP).  No positives -> no lite pre-filter; Houdini is the judge.
         union = dedup_normalized(c for r in rollouts for c in r)
+        refine_rounds = 0
+        if self.m_refine > 0:
+            union, refine_rounds = self._refine_loop(union, loop_idx)
         survivors = self.filter.filter(self.prog, loop_idx, union, positives=None)
         annotated = annotate.build_annotated(self.prog, survivors, loop_idx)
         verified = self._verify(annotated)
@@ -231,6 +288,7 @@ class InferenceFramework:
             n_rollouts=self.n_rollouts,
             rollouts=rollouts,
             filtered_rollouts=None,
+            refine_rounds=refine_rounds,
         )
 
     def run(self) -> InferenceResult:

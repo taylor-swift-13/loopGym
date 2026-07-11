@@ -1,4 +1,6 @@
-# SAM2INV
+# LoopGym
+
+*(formerly SAM2INV)*
 
 RL pipeline for training a model to generate **ACSL loop invariants** for C
 programs, verified with **Frama-C/WP**. Three **independent** components (they
@@ -40,71 +42,35 @@ run passes through):
 
 The strongest invariant is the **tightest characterization of the reachable set**:
 sound on every positive, ruling out as many impossible histories as possible.
-Negatives come in two *balanced* dimensions, both truthful by construction
-(no program-type special-casing):
+The design is deliberately **minimal**: three negative families, each with a
+construction-time unreachability argument, plus three truthfulness vetoes —
+no scoring-side patch layers.
 
-- **relation** — small single-axis / joint pairwise steps (±1..3) off the
-  reachable manifold, taken only from bases whose local trace window is densely
-  sampled, so a surviving perturbation is genuinely off-manifold and not an
-  unsampled trace neighbor;
-- **bound** — the "law holds but range violated" dimension:
-  *over-run* (the loop body executed past a **genuine** exit, continuing the real
-  dynamics — preserves every relation, linear *and* nonlinear, e.g. `z==x*y`)
-  plus *box-escape* (large ladder steps ±5..89 kept only when they leave the
-  variable's sampled range).
+Three negative families:
 
-Anti-reward-hack guards (verified by `rl_pipeline/eval/discrimination.py`):
+- **relation** — small perturbations (±1, ±2) off DENSE bases: every in-window
+  reachable neighbor is known, so a surviving perturbation is genuinely
+  off-manifold, not an unsampled trace neighbor;
+- **over-run** — the loop body executed past a **genuine** exit: real dynamics
+  (preserves every relation, linear *and* nonlinear, e.g. `z==x*y`), out of the
+  reachable range;
+- **escape** — large ladder steps kept only when they leave the variable's
+  sampled range.
 
-- loops run to their **real exit** (printing is throttled, not the execution), so
-  sampled ranges are true ranges and overfit constant bounds can't outscore the
-  true invariant;
-- inputs must satisfy the **full `requires`** (including param-vs-param
-  constraints) — out-of-precondition traces would poison the positive filter;
-- perturbed states that could be a **fresh loop entry** (params free, literal
-  locals at inits, requires satisfiable) are never labeled negative — they are
-  reachable under different inputs;
-- runs hitting the divergence cap disable box-escape; `while(unknown())` guards
-  disable the whole bound dimension (no range is sound there);
-- `unknown()` INSIDE the body means the state graph branches: runs are doubled
-  for branch coverage, and perturbations that merely RECOMBINE observed
-  coordinate values are dropped (they may sit on an unobserved branch) — only
-  candidates with a novel coordinate value survive;
-- branch-dependent (taint-analyzed, incl. control dependence and braceless
-  arms) variables are never perturbed directly — but four CONSERVATION rescues
-  still give them sound negatives: rigid pairs (`cw·v − cv·w` constant when v,w
-  are co-assigned constant steps at identical sites), gcd lattices
-  (`v ≡ v_entry mod g` when every step of v is a multiple of g, e.g.
-  `if(unknown()) i+=6; else i+=3;` → i mod 3), monotone floors/ceilings
-  (`v >= min(entry, literals)` when every assignment is a same-sign const step
-  or an int literal; literal-only state tags get both directions), and
-  guard-derived bounds (`v <= X` when the single unit up-step sits under a
-  `v != X` / `v < X` conjunct with X frozen — unit steps cannot skip the
-  block; entry/reset literals are runtime-checked per state).  Rescue deltas
-  are seed-hashed so the clustered bound±d values cannot be farm-memorized
-  across seeds;
-- multi-clause `requires` are conjoined, and param-vs-param constraints are
-  enforced by evaluation, so out-of-precondition inputs never poison positives;
-- ACSL predicates evaluate under C integer semantics (truncating `/` and `%`),
-  matching the executed states — honest division invariants are never filtered
-  by a floor-semantics artifact;
-- input tuples are drawn in two phases (diverse stripe, then a mixed-radix grid
-  over tier combinations) so param-vs-param `requires` like `z == k` are
-  actually satisfied instead of falling back to unchecked inputs;
-- **seed-hashed far probes**: each sample includes a few large-magnitude input
-  tuples whose values are hashed from the seed (cube-overflow-safe, honoring
-  explicit `requires` bounds) — every seed's input envelope differs, so a
-  sample-extreme box (`lo <= v <= hi` at observed extremes) fitted on the
-  training seeds is unsound on a holdout seed's positives and gets filtered,
-  while a true symbolic bound (`x <= n`) is indifferent;
-- **seed-hashed tier jitter** (non-edge tiers only; equal-tuples preserved for
-  `z == k`-style requires) decorrelates sampled VALUES across seeds, so
-  pointwise `v != k` value memorization also fails to transfer to the holdout;
-- relation bases are chosen among DENSE positions (full forward trace window
-  sampled), so long throttled traces still yield a negative pool far too large
-  for clause-budgeted memorizers;
-- the many distinct box-escape values per axis make pointwise `v != k` farms
-  uneconomical, and relation/bound balance keeps either dimension from
-  dominating the reward.
+Three truthfulness vetoes (a candidate negative is dropped unless provably
+impossible):
+
+- states observed **reachable** are never negatives;
+- states that could be a **fresh loop entry** (params free, `requires`
+  satisfiable) are never negatives — they are reachable under other inputs;
+- **nondet-tainted** variables are never perturbed; a nondet guard disables the
+  bound families (the sampled range is then an under-approximation), and capped
+  runs disable escapes.
+
+Supporting mechanics: loops run to their real exit (printing is throttled, not
+the execution); inputs satisfy the full multi-clause `requires` incl.
+param-vs-param constraints; far input placement is seed-hashed; ACSL predicates
+evaluate under C integer semantics (truncating `/` and `%`).
 
 `unknown()` guards/values are supported (an undefined oracle is given a
 nondeterministic body; a per-run `srand` explores varied-length traces).
@@ -119,18 +85,11 @@ es.groups(0)   # witness-index groups, one per impossible trace
 CLI: `python -m rl_pipeline.sampler.example_sampler <file.c>`
 
 **Discrimination harness** — `python -m rl_pipeline.eval.discrimination` scores
-rollout families of known quality (gold/loose/trivial/unsound + adversarial
-disequality farms at 16/64/512-clause budgets, whole-state and chunked
-mega-conjunction memorizers, constant-bound and delta-space (`v − \at(v,Pre)`)
-overfit boxes, modulus and affine sample-coincidence hacks, a combo attack, and
-gold-plus-spray) on 9 benchmark programs.  Threat model: the adversary
-generators see the union of every CANONICAL seed's sample; scoring — as
-deployed — min-combines the canonical seeds plus a HOLDOUT seed the adversary
-never saw.  Fails if a memorizer or overfit box gets within 0.10 of gold
-(sample-extreme boxes are exempt only on `box_true` programs, where the
-reachable box is input-independent and hence a true invariant), if spray isn't
-ranked strictly below the clean set, if junk approaches gold, or if a true
-invariant gets filtered (sampler mislabel).
+rollout families of known quality (gold / loose / trivial / guard / post /
+unsound) on benchmark programs and fails on ranking violations — e.g. a weaker
+family outscoring gold, or a true invariant getting filtered (sampler
+mislabel).  Quality discrimination is the sampler's job; soundness is delegated
+entirely to the always-on real Houdini cascade in the reward.
 
 **Mislabel audit** — `python -m rl_pipeline.eval.mislabel_audit` sweeps the FULL
 benchmark suite (366 programs) and fails if any sampled negative shows up as a
@@ -139,62 +98,76 @@ the true invariants — the root of every reward hack).
 
 ## 2. Reward — `rl_pipeline/reward`
 
-Scores a **group** of rollouts. For each rollout `A`:
+Scores a **group** of rollouts. For each rollout `A` (in impossible-trace
+units — one fake continuation is ONE negative, not twenty-four):
 
 - `base[A]`     = negatives rejected by **Houdini(A alone)** — its own kill rate;
 - `marginal[A]` = `rejected(Houdini(∪)) − rejected(Houdini(∪ \ A))` — the effect on
   the group's kill rate of removing `A` (ablation);
-- `junk[A]`     = fraction of `A`'s emitted invariants that are NOT useful:
-  killed by the filter (unsound / out-of-scope / memorization-sized) **or**
-  surviving without a UNIQUE rejection — spray that only shadows stronger
-  clauses in the same rollout costs the same as filtered garbage, so a clean
-  set ranks strictly above the same set padded with riders;
-- `reward[A]`   = `max(0, w_base·base[A] + w_marg·marginal[A] − w_junk·junk[A])`
-  with **hyperparameters** `w_base` / `w_marg` / `w_junk` (0.5/0.5/0.05);
+- `reward[A]`   = `w_base·base[A] + w_marg·marginal[A]` (default 0.5/0.5) —
+  **that is the whole formula**: no junk term, no complexity gates, no
+  multi-seed min-combining.  Soundness is not a scoring patch — it is the
+  always-on real Houdini cascade (`PositiveFilter → Frama-C/WP fixpoint`);
+  anything unsound or trivial simply never survives to score;
 - `batch_score` = negatives rejected by `Houdini(∪)`.
-
-Anti-hack, three independent layers:
-
-- **per-predicate complexity gate** (>160 chars or >12 atoms dropped) — kills
-  the single mega-conjunction of negated sampled states;
-- **rollout atom budget** (32 comparison atoms across the whole set; scoring
-  uses the emission-order prefix) — kills the SPLIT mega-conjunction: hundreds
-  of small gate-compliant clauses (`v != k`, `!(x==a && y==b)`) memorizing the
-  negative pool one state at a time.  Honest sets (~3-6 clauses × 1-4 atoms)
-  fit with generous headroom;
-- **multi-seed + holdout scoring**: rewards are min-combined over `n_seeds`
-  (default 2) canonical example sets PLUS `n_holdout` (default 1) freshly-seeded
-  ones (random seed per call unless pinned).  A policy can memorize every
-  canonical seed it trains against; it cannot memorize a sample it has never
-  seen — and thanks to far probes / tier jitter, the holdout's values and
-  extremes genuinely differ, so overfit boxes get filtered and memorized
-  farms miss.  True invariants are indifferent to the seed.
 
 ```python
 from rl_pipeline.reward import RewardCalculator
-br = RewardCalculator(w_base=0.5, w_marg=0.5, w_junk=0.05,
-                      n_seeds=2, n_holdout=1).compute(source, rollouts)
-br.to_dict()   # rollout_rewards[], base[], marginal[], batch_score, seeds, should_reroll
+br = RewardCalculator(w_base=0.5, w_marg=0.5).compute(source, rollouts)
+br.to_dict()   # rollout_rewards[], base[], marginal[], batch_score, should_reroll
 ```
 
-**HTTP service** (the training interface):
+**Refine reward** — `rl_pipeline/reward/refine.py` scores a refine group (n
+LLM repairs of one merged pool) as each refinement's marginal contribution:
+`delta_base[i] = base(Houdini(pool ∪ refined_i)) − base(Houdini(pool))`.
+Δ ≥ 0 by construction; trivial / copied / broken refinements score 0 for free.
+
+**HTTP service** (the training interface — see
+[docs/training_integration.md](docs/training_integration.md) for the full
+turnkey contract):
 ```bash
 python -m rl_pipeline.reward.service --host 0.0.0.0 --port 8000
+# generation reward
 curl -s localhost:8000/reward -H 'content-type: application/json' \
      -d '{"program":"<C src>","rollouts":[{"invariants":["z==x*y","x>=0"]}]}'
+# refine prompt construction (verdict table + assembled prompt, server-side frama-c)
+curl -s localhost:8000/refine_feedback -H 'content-type: application/json' \
+     -d '{"program":"<C src>","pool":["x >= y","y >= 0"]}'
+# refine reward (Δbase per sampled refinement)
+curl -s localhost:8000/refine_reward -H 'content-type: application/json' \
+     -d '{"program":"<C src>","pool":["x >= y"],"refinements":[["y >= 0","x >= 1"]]}'
 ```
 
 ## 3. Inference — `rl_pipeline/inference` (independent of the reward; does NOT sample)
 
 ```python
 from rl_pipeline.inference import InferenceFramework, VLLMRolloutProvider
-inf = InferenceFramework(source, rollout_provider=VLLMRolloutProvider(model="..."))
-res = inf.run()   # generate → union → Houdini → Frama-C verify
-res.final_invariants, res.verified
+inf = InferenceFramework(source, rollout_provider=VLLMRolloutProvider(model="..."),
+                         m_refine=2)   # m_refine=0 (default) = plain pipeline
+res = inf.run()   # generate → union → m refine rounds → Houdini → Frama-C verify
+res.final_invariants, res.verified, res.refine_rounds
 ```
 - `hide_assert=True` (default, closed-book): the model synthesises invariants from
   the loop, never seeing the assert; `hide_assert=False` shows the full program.
+- **m-round refine**: each round runs a cheap WP precheck (syntax + one WP pass,
+  no fixpoint) over the merged pool, renders a per-invariant verdict table
+  (`filters.Verdict` — syntax errors quote frama-c, WP failures say whether
+  establishment or preservation broke), and asks the model to repair; refined
+  candidates JOIN the pool (originals kept — a later companion invariant can
+  rescue an earlier reject).  Early stops: nothing rejected / pool fixpoint /
+  round budget.  The final full-Houdini + verify gate means refine can never
+  make the accepted output worse than `m_refine=0`.
 - CLI: `python -m rl_pipeline.inference --model <hf-or-dir> --inputs '<glob>'`.
+
+## 4. Prompts — `prompt/` (single source of truth)
+
+All LLM prompt text lives in `prompt/` as files — never inline in code:
+`generate_prompt.txt`, `refine_prompt.txt`, `system_prompt.txt`.  Loaded by
+`rl_pipeline/common/prompts.py`; both Docker images COPY the directory.  The
+refine prompt is **stateless by design** (program + current pool verdicts only,
+no round number, no history) so a policy trained on single-round refine groups
+transfers to multi-round inference unchanged.  Training and inference format
+the SAME template — edit the file, both sides follow.
 
 ## Houdini / Frama-C
 
@@ -209,8 +182,8 @@ it, everything still runs on the lite filter.
 
 | Image | Build (context = repo root) | Runs |
 |-------|-----------------------------|------|
-| **reward service** | `docker build -f deploy/Dockerfile.reward -t sam2inv-reward .` | `rl_pipeline.reward.service` (gcc + frama-c bundled) |
-| **inference** | `docker build -f deploy/Dockerfile.inference -t sam2inv-inference .` | `rl_pipeline.inference` (vLLM + frama-c bundled) |
+| **reward service** | `docker build -f deploy/Dockerfile.reward -t loopgym-reward .` | `rl_pipeline.reward.service` (gcc + frama-c bundled) |
+| **inference** | `docker build -f deploy/Dockerfile.inference -t loopgym-inference .` | `rl_pipeline.inference` (vLLM + frama-c bundled) |
 
 Both bundle frama-c/z3/why3, so a deployment host needs **no local frama-c**.
 
@@ -227,9 +200,11 @@ Both bundle frama-c/z3/why3, so a deployment host needs **no local frama-c**.
 
 ```
 rl_pipeline/          sampler / reward / inference / common
+prompt/               ALL LLM prompts (generate / refine / system) — edit here
 src/                  reused engine deps (config, llm, houdini_pruner,
                       output_verify, syntax_checker, unified_filter, run_dirs)
-                      + prompts/system_prompt.txt + input/ (benchmark C programs)
+                      + input/ (benchmark C programs)
 deploy/               Dockerfiles + requirements
-docs/                 reward_pipeline_plan.md
+docs/                 training_integration.md (训练侧开箱即用 contract),
+                      reward_pipeline_plan.md, local_model_setup.md
 ```

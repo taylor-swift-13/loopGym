@@ -76,15 +76,10 @@ def param_constraints(requires: str, params: List[str]) -> Dict[str, Dict[str, i
 # tiers give broad coverage: edges, small, medium (both signs where allowed)
 _TIERS = [0, 1, 2, -1, 3, 5, 8, -2, 10, 17, 4, -3, 25, 6, 40, 7, -5, 13, 50, 9]
 
-# Far probes: a few large-magnitude input tuples whose values are HASHED FROM
-# THE SEED, so every seed's input envelope is different.  The small tiers above
-# are seed-independent (the seed only rotates their phase), which lets a
-# sample-extreme box (`lo <= v <= hi` at observed extremes) stay consistent
-# across ALL seeds — the holdout seed could never punish it.  With far probes,
-# a box fitted to the canonical seeds' extremes is violated by the holdout's
-# positives (different probe values) and gets filtered as unsound, while a true
-# symbolic bound (x <= n) is indifferent.  Magnitude is capped cube-safe
-# (512^3 < 2^31) so nonlinear gold invariants stay overflow-free.
+# Far probes: a few large-magnitude input tuples (COVERAGE: they widen the
+# input envelope far beyond the small tiers, witnessing deep loop states and
+# input-relative ranges the near tiers never reach).  Magnitude is capped
+# cube-safe (512^3 < 2^31) so nonlinear gold invariants stay overflow-free.
 _FAR_MAX = 512
 _FAR_COUNT = 3
 _FAR_BAND = 149          # probe k roams band [65 + k*149, 65 + (k+1)*149)
@@ -130,21 +125,9 @@ def _clamp_tier(cand: int, cons: Dict[str, Dict[str, int]], p: str) -> int:
     return int(cand)
 
 
-def _jitter_tier(t: int, seed: int, r: int) -> int:
-    """Seed-hashed +/-2 jitter on NON-EDGE tiers: decorrelates the sampled
-    values across seeds so pointwise value memorization (`v != k` farms) fitted
-    on the canonical seeds misses the holdout's clusters.  Edge tiers
-    (0, +/-1, 2, 3) stay exact — boundary behavior must always be sampled.
-    The jitter is the same for every param of a run, so all-equal tuples
-    (needed by `z == k`-style requires) stay all-equal."""
-    if abs(t) < 4:
-        return t
-    return t + (seed * 131 + r * 17) % 5 - 2
-
-
 def _tier_tuple(params: List[str], cons: Dict[str, Dict[str, int]], r: int, seed: int) -> Dict[str, int]:
     """Phase-1 stripe: all params move together — broad, diverse tuples."""
-    return {p: _clamp_tier(_jitter_tier(_TIERS[(r + j * 7 + seed) % len(_TIERS)], seed, r), cons, p)
+    return {p: _clamp_tier(_TIERS[(r + j * 7 + seed) % len(_TIERS)], cons, p)
             for j, p in enumerate(params)}
 
 
@@ -157,7 +140,7 @@ def _grid_tuple(params: List[str], cons: Dict[str, Dict[str, int]], r: int, seed
     vals: Dict[str, int] = {}
     for j, p in enumerate(params):
         digit = (r // (n ** j) + seed) % n
-        vals[p] = _clamp_tier(_jitter_tier(_TIERS[digit], seed, r), cons, p)
+        vals[p] = _clamp_tier(_TIERS[digit], cons, p)
     return vals
 
 
@@ -185,8 +168,7 @@ def sample_inputs(params: List[str], cons: Dict[str, Dict[str, int]], n_runs: in
         runs.append(vals)
         return True
 
-    # phase 0 — seed-hashed far probes (guaranteed slots): every seed's input
-    # envelope differs, so sample-extreme boxes cannot generalize across seeds.
+    # phase 0 — far probes (guaranteed slots): wide input envelope coverage.
     # Probes _FAR_COUNT.._FAR_COUNT+1 are the ORDERED all-positive tuples
     # (see _far_probe) — only emitted for multi-param programs, where ordering
     # exists at all
