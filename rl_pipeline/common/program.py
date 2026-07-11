@@ -103,17 +103,61 @@ def _strip_comments(src: str) -> str:
     return "".join(out)
 
 
+_ACSL_BINDER_RE = re.compile(r"\\(?:forall|exists|lambda|let)\b")
+
+
+def _acsl_clause_end(source: str, expression_start: int) -> int:
+    """Return the terminating semicolon's index, ignoring binder semicolons."""
+    pending_binders = 0
+    index = expression_start
+    while index < len(source):
+        if source[index] == "\\":
+            binder = _ACSL_BINDER_RE.match(source, index)
+            if binder:
+                pending_binders += 1
+                index = binder.end()
+                continue
+        if source[index] == ";":
+            if pending_binders:
+                pending_binders -= 1
+            else:
+                return index
+        index += 1
+    return len(source)
+
+
+def _iter_acsl_clauses(source: str, keyword: str):
+    for match in re.finditer(rf"\b{re.escape(keyword)}\b", source):
+        end = _acsl_clause_end(source, match.end())
+        stop = end + 1 if end < len(source) else end
+        yield match.start(), stop, source[match.end():end].strip()
+
+
+def _strip_acsl_targets(body: str) -> str:
+    out: List[str] = []
+    cursor = 0
+    for match in re.finditer(r"\b(?:assert|ensures)\b", body):
+        if match.start() < cursor:
+            continue
+        end = _acsl_clause_end(body, match.end())
+        stop = end + 1 if end < len(body) else end
+        out.append(body[cursor:match.start()])
+        out.append(re.sub(r"[^\n]", " ", body[match.start():stop]))
+        cursor = stop
+    out.append(body[cursor:])
+    return "".join(out)
+
+
 def _extract_requires(src: str) -> str:
     """All `requires <expr>;` clauses conjoined — a precondition may span several
     clauses (`requires x>0; requires y>0;`) and dropping any of them lets
     out-of-contract inputs poison the sampled positives."""
-    clauses = [m.group(1).strip() for m in re.finditer(r"requires\s+(.+?);", src, flags=re.DOTALL)]
+    clauses = [expression for _, _, expression in _iter_acsl_clauses(src, "requires")]
     if len(clauses) > 1:
         return " && ".join(f"({c})" for c in clauses)
-    m = re.search(r"requires\s+(.+?);", src, flags=re.DOTALL)
-    if not m:
+    if not clauses:
         return ""
-    return re.sub(r"\s+", " ", m.group(1)).strip()
+    return re.sub(r"\s+", " ", clauses[0]).strip()
 
 
 def strip_postcondition(source: str) -> str:
@@ -125,22 +169,13 @@ def strip_postcondition(source: str) -> str:
     verification, while the sampler ignores the target. `requires` is kept."""
     # Preserve input contracts when `requires` and `ensures` share one block.
     def _strip_target_clauses(match):
-        body = re.sub(
-            r"\b(?:assert|ensures)\b[^;]*;",
-            "",
-            match.group(1),
-            flags=re.DOTALL,
-        )
+        body = _strip_acsl_targets(match.group(1))
         return "/*@" + body + "*/" if body.strip() else ""
 
     out = re.sub(r"/\*@(.*?)\*/", _strip_target_clauses, source, flags=re.DOTALL)
 
     def _strip_line_target(match):
-        body = re.sub(
-            r"\b(?:assert|ensures)\b[^;]*(?:;|$)",
-            "",
-            match.group(1),
-        )
+        body = _strip_acsl_targets(match.group(1))
         prefix = "//@" + body.rstrip() if body.strip() else ""
         return prefix + match.group(2)
 
@@ -166,13 +201,12 @@ def _function_contract(src: str, signature_start: int) -> str:
 def _extract_post(src: str, after: int, before: int, contract: str = "") -> str:
     """Find an `assert <expr>;` (preferred, after the loop) or an `ensures`."""
     # assert after the loop
-    for m in re.finditer(r"\bassert\s*(.+?);", src, flags=re.DOTALL):
-        if after <= m.start() < before:
-            return re.sub(r"\s+", " ", m.group(1)).strip()
+    for start, _, expression in _iter_acsl_clauses(src, "assert"):
+        if after <= start < before:
+            return re.sub(r"\s+", " ", expression).strip()
     # ensures clause
-    m = re.search(r"ensures\s+(.+?);", contract, flags=re.DOTALL)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
+    for _, _, expression in _iter_acsl_clauses(contract, "ensures"):
+        return re.sub(r"\s+", " ", expression).strip()
     return ""
 
 

@@ -233,6 +233,7 @@ deploy/               Dockerfiles + requirements
 docs/                 training_integration.md, local_model_setup.md
 paper/                current method description and reproducible evaluation
 tests/                standard-library regression tests
+unsupported/          exact upstream inputs outside LoopGym's supported model
 ```
 
 ## Benchmark corpora
@@ -240,19 +241,22 @@ tests/                standard-library regression tests
 - `src/input/{linear,NLA_lipus}/` is LoopGym's 366-program canonical sampler
   suite.  It is the suite covered by the discrimination and mislabel-audit
   results reported above and in the paper.
-- `src/input/Loopy/` contains all 469 programs from Loopy's scalar
-  loop-invariant corpus, normalized to LoopGym's single braced-`while`, scalar
-  integer input model.  The numeric filename-to-upstream-path mapping,
-  checksums, transformations, source notices, and three fixed-point adaptations
-  are documented in [`src/input/Loopy/README.md`](src/input/Loopy/README.md).
+- `src/input/Loopy/` contains the 466 integer programs from Loopy's official
+  469-program loop-invariant corpus, normalized to LoopGym's single braced-
+  `while`, scalar integer input model. The numeric filename-to-upstream-path
+  mapping, checksums, transformations, and source notices are documented in
+  [`src/input/Loopy/README.md`](src/input/Loopy/README.md).
+- [`unsupported/loopy/`](unsupported/loopy/) preserves exact upstream copies of
+  official IDs 353--355. They require floating-point reasoning and are excluded
+  from every LoopGym input suite and result.
 
 The Loopy snapshot is a comparison corpus, not a disjoint or held-out set, and
 is not part of the measured 366-program sampler audit.  The imported programs
 are kept separate so future Loopy results cannot be confused with that existing
 measurement.
 
-The two corpora also share upstream sources, including Code2Inv, so `366 + 469`
-must not be reported as a count of distinct semantic tasks.
+The two supported corpora also share upstream sources, including Code2Inv, so
+`366 + 466` must not be reported as a count of distinct semantic tasks.
 
 ## Verification
 
@@ -266,5 +270,5 @@ python3 -m rl_pipeline.eval.mislabel_audit --suite loopy --jobs 8
 
 The evaluation commands are slower than the unit tests.  The default mislabel
 audit retains the published 366-program core boundary; `--suite loopy` selects
-the normalized 469-program comparison corpus. Put the Frama-C/Why3 binaries on
+the normalized 466-program comparison corpus. Put the Frama-C/Why3 binaries on
 `PATH` to exercise the real cascade.

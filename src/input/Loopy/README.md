@@ -1,8 +1,9 @@
 # Loopy Loop-Invariant Inputs
 
-This directory contains the 469 positive, single-method, single-loop programs
-used by *Finding Inductive Loop Invariants using Large Language Models*.
-They are normalized for LoopGym instead of being stored as a second raw corpus.
+This directory contains the 466 integer, single-method, single-loop programs
+from the 469-program corpus used by *Finding Inductive Loop Invariants using
+Large Language Models*. They are normalized for LoopGym instead of being stored
+as a second raw corpus.
 
 ## Provenance
 
@@ -36,11 +37,12 @@ and applies these source-level changes:
 - all functions use unique `loopy_<id>` names and contain exactly one braced
   `while` loop.
 
-The three floating-point inputs cannot be translated exactly into LoopGym's
-integer trace/reward model. Files `353.c`, `354.c`, and `355.c` are explicitly
-marked `fixed-point-adaptation` in the manifest and use scale 1000. They retain
-the original control structure and safety-goal direction, but they are adapted
-integer tasks rather than bit-for-bit C floating-point equivalents.
+Official IDs 353--355 require floating-point reasoning, which neither LoopGym's
+sampler nor its predicate evaluator supports. Their exact upstream sources are
+kept in [`unsupported/loopy/`](../../../unsupported/loopy/) and are excluded
+from this manifest, suite discovery, sampling, and reported LoopGym results.
+IDs are intentionally not renumbered so every remaining filename still matches
+the official Loopy order.
 
 ## Scope
 

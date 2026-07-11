@@ -10,6 +10,7 @@ paper/
 docs/
 models/
 src/input/
+unsupported/
 src/prompts/
 src/log/
 src/loop/

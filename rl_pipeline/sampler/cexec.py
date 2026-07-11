@@ -575,6 +575,19 @@ def _compile_run_parse(full: str, prog: Program, inputs, loop_idx, timeout, run_
                 stdout = stdout.decode(errors="replace")
             states, _ = _parse_output(stdout, loop_idx, prog.pre_vars, inputs, run_id)
             return states, True
+        except OSError as exc:
+            raise ValueError(f"could not run instrumented program: {exc}") from exc
+        if res.returncode != 0:
+            status = (
+                f"signal {-res.returncode}"
+                if res.returncode < 0
+                else f"status {res.returncode}"
+            )
+            detail = res.stderr.strip()
+            suffix = f": {detail[:500]}" if detail else ""
+            raise ValueError(
+                f"instrumented program exited abnormally ({status}){suffix}"
+            )
         return _parse_output(res.stdout, loop_idx, prog.pre_vars, inputs, run_id)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -202,8 +202,17 @@ class InferenceFramework:
                 f.write(annotated_code)
             v = OutputVerifier(logger=self.log)
             v.run(cpath)
-            syntax = getattr(v, "syntax_correct", False) or getattr(v, "syntax_error", "") == "syntax Correct"
-            valid = bool(v.validate_result) and all(v.validate_result)
+            syntax_error = getattr(v, "syntax_error", "")
+            syntax = (
+                getattr(v, "syntax_correct", False)
+                or syntax_error == "syntax Correct"
+            ) and syntax_error in {"", "syntax Correct"}
+            validation = list(v.validate_result or [])
+            expected_invariants = len(extract_invariants(annotated_code))
+            valid = (
+                len(validation) == expected_invariants
+                and all(validation)
+            )
             # Assertions may sit inside the loop, while Program.post
             # intentionally describes only a post-loop target.
             # Closed-book stripping is the canonical all-location target

@@ -106,6 +106,42 @@ class ParserAndAnnotationRegressionTests(unittest.TestCase):
         self.assertEqual(line_program.requires, "n >= 0")
         self.assertEqual(line_program.post, r"\result == 0")
 
+    def test_strip_postcondition_removes_complete_quantified_targets(self):
+        source = (
+            "/*@\n"
+            "  requires \\forall integer k; k >= 0 ==> n >= 0;\n"
+            "  ensures \\forall integer k; k >= 0 ==> \\result <= k;\n"
+            "  assigns \\nothing;\n"
+            "*/\n"
+            "int f(int n) {\n"
+            "  int x = 0;\n"
+            "  while (x < n) { x++; }\n"
+            "  /*@ assert \\let limit = n; \\forall integer i; "
+            "0 <= i < limit ==> x >= i; */\n"
+            "  return x;\n"
+            "}\n"
+        )
+
+        stripped = strip_postcondition(source)
+        original = parse_program(source)
+        masked = parse_program(stripped)
+
+        self.assertIn(r"requires \forall integer k; k >= 0 ==> n >= 0;", stripped)
+        self.assertIn(r"assigns \nothing;", stripped)
+        self.assertNotIn("ensures", stripped)
+        self.assertNotIn("assert", stripped)
+        self.assertNotIn(r"\result <= k", stripped)
+        self.assertNotIn("x >= i", stripped)
+        self.assertEqual(
+            original.requires,
+            r"\forall integer k; k >= 0 ==> n >= 0",
+        )
+        self.assertEqual(
+            original.post,
+            r"\let limit = n; \forall integer i; 0 <= i < limit ==> x >= i",
+        )
+        self.assertEqual(masked.post, "")
+
     def test_parser_skips_helper_before_loop_function(self):
         source = (
             "int unknown(void) { return 0; }\n"
@@ -190,6 +226,15 @@ class SyntaxScrubRegressionTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("gcc"), "gcc is required for sampler tests")
 class SamplerIntegrationRegressionTests(unittest.TestCase):
+    def test_abnormal_program_exit_fails_sampling(self):
+        source = (
+            "#include <stdlib.h>\n"
+            "void f(void) { int x = 0; while (x < 2) { x++; abort(); } }"
+        )
+
+        with self.assertRaisesRegex(ValueError, "exited abnormally"):
+            ExampleSampler(source, n_runs=1).sample()
+
     def test_typed_oracle_stub_and_labelled_body_compile(self):
         typed = (
             "extern unsigned int unknown_uint(void); "
@@ -346,18 +391,51 @@ class InferenceRegressionTests(unittest.TestCase):
             return list(invariants)
 
     @staticmethod
-    def _fake_verifier(verify_result):
+    def _fake_verifier(verify_result, validate_result=()):
         class FakeOutputVerifier:
             def __init__(self, logger=None):
                 self.syntax_correct = True
                 self.syntax_error = "syntax Correct"
-                self.validate_result = [True]
+                self.validate_result = list(validate_result)
                 self.verify_result = list(verify_result)
 
             def run(self, path):
                 return None
 
         return FakeOutputVerifier
+
+    def test_no_invariants_can_still_verify_the_target(self):
+        source = (
+            "void f(void) { int x = 0; while (x < 1) { x++; } "
+            "/*@ assert x == 1; */ }"
+        )
+        framework = InferenceFramework(
+            source,
+            rollout_provider=MockRolloutProvider([[]]),
+            invariant_filter=self._IdentityFilter(),
+            n_rollouts=1,
+            max_rerolls=0,
+        )
+
+        with mock.patch.object(
+            inference_module.filters, "frama_c_available", return_value=True
+        ):
+            no_invariants = self._fake_verifier([True], validate_result=[])
+            with mock.patch("src.output_verify.OutputVerifier", no_invariants):
+                self.assertIs(framework._verify(source), True)
+
+            missing_result = self._fake_verifier([True], validate_result=[])
+            annotated = annotate.build_annotated(
+                framework.original_prog, ["x >= 0"]
+            )
+            with mock.patch("src.output_verify.OutputVerifier", missing_result):
+                self.assertIs(framework._verify(annotated), False)
+
+            successful_result = self._fake_verifier(
+                [True], validate_result=[True]
+            )
+            with mock.patch("src.output_verify.OutputVerifier", successful_result):
+                self.assertIs(framework._verify(annotated), True)
 
     def test_importing_inference_does_not_import_sampler(self):
         env = os.environ.copy()
@@ -518,7 +596,7 @@ class InferenceRegressionTests(unittest.TestCase):
 
 
 class CommandAndPackagingRegressionTests(unittest.TestCase):
-    def test_loopy_manifest_covers_normalized_inputs(self):
+    def test_loopy_manifests_partition_supported_and_float_inputs(self):
         loopy = ROOT / "src" / "input" / "Loopy"
         manifest = [
             json.loads(line)
@@ -528,9 +606,10 @@ class CommandAndPackagingRegressionTests(unittest.TestCase):
             if line.strip()
         ]
         c_files = sorted(loopy.glob("*.c"), key=lambda path: int(path.stem))
+        supported_ids = list(range(1, 353)) + list(range(356, 470))
 
-        self.assertEqual(len(manifest), 469)
-        self.assertEqual([row["id"] for row in manifest], list(range(1, 470)))
+        self.assertEqual(len(manifest), 466)
+        self.assertEqual([row["id"] for row in manifest], supported_ids)
         self.assertEqual([row["file"] for row in manifest], [p.name for p in c_files])
         for row, path in zip(manifest, c_files):
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -539,26 +618,57 @@ class CommandAndPackagingRegressionTests(unittest.TestCase):
             self.assertNotRegex(source, r"\b(?:for|do)\s*\(")
             self.assertEqual(len(parse_program(source).loops), 1)
 
-        fixed_point = {
-            row["id"] for row in manifest
-            if row["semantic_status"] == "fixed-point-adaptation"
-        }
-        self.assertEqual(fixed_point, {353, 354, 355})
+        self.assertEqual(
+            {row["semantic_status"] for row in manifest},
+            {"integer-normalization"},
+        )
         self.assertEqual(len(discover_programs("core")), 366)
-        self.assertEqual(len(discover_programs("loopy")), 469)
-        self.assertEqual(len(discover_programs("all")), 835)
+        self.assertEqual(len(discover_programs("loopy")), 466)
+        self.assertEqual(len(discover_programs("all")), 832)
         self.assertTrue((loopy / "UPSTREAM_LICENSE.txt").is_file())
         self.assertTrue((loopy / "sources.txt").is_file())
         licenses = [
             path for path in (loopy / "LICENSES").rglob("*")
             if "license" in path.name.lower()
         ]
-        self.assertEqual(len(licenses), 18)
+        self.assertEqual(len(licenses), 17)
         self.assertFalse((ROOT / "benchmarks").exists())
 
         inference_cli = importlib.import_module("rl_pipeline.inference.__main__")
         expanded = inference_cli._expand([str(loopy)])
         self.assertEqual(expanded, sorted(str(path) for path in c_files))
+        all_supported = inference_cli._expand([str(ROOT / "src" / "input")])
+        self.assertEqual(len(all_supported), 832)
+        unsupported = ROOT / "unsupported" / "loopy"
+        self.assertFalse(
+            any(str(unsupported) in path for path in all_supported)
+        )
+
+        float_manifest = [
+            json.loads(line)
+            for line in (unsupported / "manifest.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        float_files = sorted(
+            unsupported.glob("*.c"), key=lambda path: int(path.stem)
+        )
+        self.assertEqual([row["id"] for row in float_manifest], [353, 354, 355])
+        self.assertEqual(
+            [row["file"] for row in float_manifest],
+            [path.name for path in float_files],
+        )
+        for row, path in zip(float_manifest, float_files):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(row["source_sha256"], digest)
+            self.assertEqual(row["output_sha256"], digest)
+            self.assertEqual(row["semantic_status"], "unsupported-float")
+            self.assertIn("float", path.read_text(encoding="ascii"))
+        self.assertEqual(
+            set(supported_ids) | {row["id"] for row in float_manifest},
+            set(range(1, 470)),
+        )
 
     def test_refine_reward_rejects_an_out_of_range_loop_index(self):
         source = "void f(void) { int x = 0; while (x < 1) { x++; } }"
