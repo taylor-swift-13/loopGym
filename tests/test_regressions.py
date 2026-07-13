@@ -164,6 +164,39 @@ class ParserAndAnnotationRegressionTests(unittest.TestCase):
 
         self.assertIn("loop assigns x, y;", annotated)
 
+    def test_loop_assigns_excludes_block_scoped_integer_locals(self):
+        source = (
+            "void f(int n) { while (n > 0) { "
+            "int __n = n; n--; __n++; } }"
+        )
+        program = parse_program(source)
+
+        annotated = annotate.build_annotated(program, ["n >= 0"])
+
+        self.assertIn("loop assigns n;", annotated)
+        self.assertNotIn("loop assigns __n", annotated)
+
+    def test_parser_accepts_scalar_integer_type_combinations(self):
+        source = (
+            "static unsigned long global_count; "
+            "void f(const unsigned long long limit, signed char step, _Bool enabled) { "
+            "long long index = 0; unsigned short delta = 1; "
+            "while (index < limit) { index += delta; } }"
+        )
+
+        program = parse_program(source)
+
+        self.assertEqual(
+            program.pre_vars,
+            ["global_count", "limit", "step", "enabled", "index", "delta"],
+        )
+        self.assertEqual(
+            program.unsigned_vars,
+            ["global_count", "limit", "delta"],
+        )
+        self.assertEqual(dict(program.local_inits)["index"], "0")
+        self.assertEqual(dict(program.local_inits)["delta"], "1")
+
     def test_parenthesized_initializers_and_globals_are_tracked(self):
         source = (
             "unsigned int g; void f(int n) { "

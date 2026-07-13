@@ -10,6 +10,9 @@ from ..common.state import normalize_invariant
 
 def modified_vars(body: str) -> List[str]:
     """Variables assigned in the loop body (for the `loop assigns` frame clause)."""
+    declared = set(re.findall(
+        r"\b(?:int|long|short|unsigned|char|_Bool)\s+(\w+)\s*[=;,]", body
+    ))
     names: List[str] = []
     pattern = re.compile(
         r"\b(\w+)\s*(?:[-+*/%]?=)(?!=)"
@@ -18,7 +21,7 @@ def modified_vars(body: str) -> List[str]:
     )
     for match in pattern.finditer(body):
         v = next(group for group in match.groups() if group)
-        if v not in names:
+        if v not in names and v not in declared:
             names.append(v)
     return names
 

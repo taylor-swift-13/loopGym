@@ -220,7 +220,8 @@ def _parse_params(param_str: str) -> Tuple[List[str], List[str]]:
         if "*" in p or "[" in p:
             raise ValueError("only scalar integer parameters are supported")
         m = re.fullmatch(
-            r"(?:const\s+)?(?:unsigned\s+|signed\s+)?int\s+(\w+)",
+            r"(?:(?:unsigned|signed|long|short|const|static)\s+)*"
+            r"(?:int|long|short|char|_Bool)\s+(\w+)",
             p,
         )
         if not m:
@@ -293,15 +294,19 @@ def _find_local_inits(src: str, func_open: int, loop_start: int) -> List[Tuple[s
     like `int a,b,p,q,r,s;` (values assigned later) — every name must be captured so
     it appears in pre_vars, else the sampler has no variables to work with."""
     region = src[func_open + 1: loop_start]
-    if re.search(r"\b(?:long|short|char|float|double|_Bool)\b", region):
-        raise ValueError("only scalar int locals are supported")
+    if re.search(r"\b(?:float|double)\b", region):
+        raise ValueError("only integer locals are supported")
     inits: List[Tuple[str, str]] = []
     seen = set()
     # `int <declarator-list>;` — split the list on commas. A bare
     # declarator has an UNKNOWN entry value ("") — inventing "0" here poisoned
     # downstream entry-value reasoning whenever the real pre-loop assignment
     # was nondeterministic (`int c; c = unknown();`).
-    for m in re.finditer(r"\b(?:unsigned\s+|signed\s+)?int\s+([^;{}]+);", region):
+    for m in re.finditer(
+        r"\b(?:(?:unsigned|signed|long|short|const|static)\s+)*"
+        r"(?:int|long|short|char|_Bool)\s+([^;{}]+);",
+        region,
+    ):
         decls = m.group(1)
         if re.fullmatch(r"\s*\w+\s*\([^=]*\)\s*", decls):
             # A function declaration, not a variable whose initializer happens
@@ -338,8 +343,14 @@ def _find_local_inits(src: str, func_open: int, loop_start: int) -> List[Tuple[s
 def _find_unsigned_locals(src: str, func_open: int, loop_start: int) -> List[str]:
     region = src[func_open + 1:loop_start]
     names: List[str] = []
-    for match in re.finditer(r"\bunsigned\s+(?:int\s+)?([^;{}]+);", region):
-        for declarator in match.group(1).split(","):
+    declaration = re.compile(
+        r"\b(?P<type>(?:(?:unsigned|signed|long|short|const|static)\s+)*"
+        r"(?:int|long|short|char|_Bool))\s+(?P<decls>[^;{}]+);"
+    )
+    for match in declaration.finditer(region):
+        if not re.search(r"\bunsigned\b", match.group("type")):
+            continue
+        for declarator in match.group("decls").split(","):
             name = declarator.partition("=")[0].strip().lstrip("*")
             name = re.sub(r"\[.*\]", "", name).strip()
             if re.fullmatch(r"\w+", name) and name not in names:
@@ -376,8 +387,6 @@ def _find_global_ints(src: str, before: int) -> Tuple[List[str], List[str]]:
         r"(?P<decls>[^;{}]+);"
     )
     for match in declaration.finditer(top_level):
-        if re.search(r"\b(?:long|short)\b", match.group("type")):
-            raise ValueError("only scalar int globals are supported")
         decls = match.group("decls")
         if "(" in decls:
             continue

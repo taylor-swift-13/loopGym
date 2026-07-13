@@ -138,13 +138,15 @@ class OpenAILLM(BaseChatModel):
             messages = [self.system_message, {"role": "user", "content": user_input}]
 
             def _call_chat(max_tokens: int):
-                return self.client.chat.completions.create(
+                kwargs = dict(
                     model=self.model_name,
                     messages=messages,
                     temperature=self.temperature,
-                    top_p=self.top_p,
                     max_tokens=max_tokens,
                 )
+                if self.top_p < 1.0:
+                    kwargs["top_p"] = self.top_p
+                return self.client.chat.completions.create(**kwargs)
 
             # 调用 OpenAI API（并在“空内容+length”时自动重试一次）
             response = _call_chat(self.max_tokens)
